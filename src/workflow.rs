@@ -418,6 +418,11 @@ pub fn merge(
     let prefix = config.window_prefix();
     cleanup(prefix, &branch_to_merge, true, delete_remote)?;
 
+    // Navigate to the main branch window if it exists
+    if tmux::is_running()? && tmux::window_exists(prefix, &main_branch)? {
+        tmux::select_window(prefix, &main_branch)?;
+    }
+
     Ok(MergeResult {
         branch_merged: branch_to_merge,
         main_branch,
@@ -461,6 +466,11 @@ pub fn remove(
     // The CLI provides a user-friendly confirmation prompt before calling this function
     let prefix = config.window_prefix();
     cleanup(prefix, branch_name, force, delete_remote)?;
+
+    // Navigate to the main branch window if it exists
+    if tmux::is_running()? && tmux::window_exists(prefix, &main_branch)? {
+        tmux::select_window(prefix, &main_branch)?;
+    }
 
     Ok(RemoveResult {
         branch_removed: branch_name.to_string(),
