@@ -541,12 +541,20 @@ workmux completions fish | source
 - Git 2.5+ (for worktree support)
 - tmux
 
-## Inspiration
+## Inspiration and related tools
 
 workmux is inspired by [wtp](https://github.com/satococoa/wtp), an excellent git
 worktree management tool. While wtp streamlines worktree creation and setup,
 workmux takes this further by tightly coupling worktrees with tmux window
 management.
+
+For managing multiple AI agents in parallel, tools like
+[claude-squad](https://github.com/smtg-ai/claude-squad) and
+[vibe-kanban](https://github.com/BloopAI/vibe-kanban/) offer dedicated
+interfaces, like a TUI or kanban board. workmux takes a different approach:
+**tmux is the interface**. If you already live in tmux, you don't need a new app
+or abstraction layer. With workmux, managing parallel agents is managing tmux
+windows.
 
 ## Related projects
 
