@@ -63,7 +63,8 @@ This will:
 3. **When done, merge and clean up**:
 
 ```bash
-workmux merge new-feature
+# Run in the worktree window
+workmux merge
 ```
 
 Merges your branch into main and cleans up everything (tmux window, worktree,
