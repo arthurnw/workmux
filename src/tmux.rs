@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::cmd::Cmd;
 use crate::config::{PaneConfig, SplitDirection};
@@ -36,6 +37,17 @@ pub fn window_exists(prefix: &str, window_name: &str) -> Result<bool> {
     match windows {
         Ok(output) => Ok(output.lines().any(|line| line == prefixed_name)),
         Err(_) => Ok(false), // If command fails, window doesn't exist
+    }
+}
+
+/// Return the tmux window name for the current pane, if any
+pub fn current_window_name() -> Result<Option<String>> {
+    match Cmd::new("tmux")
+        .args(&["display-message", "-p", "#{window_name}"])
+        .run_and_capture_stdout()
+    {
+        Ok(name) => Ok(Some(name.trim().to_string())),
+        Err(_) => Ok(None),
     }
 }
 
@@ -138,6 +150,25 @@ pub fn kill_window(prefix: &str, window_name: &str) -> Result<()> {
         .args(&["kill-window", "-t", &target])
         .run()
         .context("Failed to kill tmux window")?;
+
+    Ok(())
+}
+
+/// Schedule a tmux window to be killed after a short delay. This is useful when
+/// the current command is running inside the window that needs to close.
+pub fn schedule_window_close(prefix: &str, window_name: &str, delay: Duration) -> Result<()> {
+    let prefixed_name = prefixed(prefix, window_name);
+    let delay_secs = format!("{:.3}", delay.as_secs_f64());
+    let script = format!(
+        "sleep {delay}; tmux kill-window -t ={window} >/dev/null 2>&1",
+        delay = delay_secs,
+        window = prefixed_name
+    );
+
+    Cmd::new("tmux")
+        .args(&["run-shell", &script])
+        .run()
+        .context("Failed to schedule tmux window close")?;
 
     Ok(())
 }

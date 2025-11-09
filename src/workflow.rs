@@ -6,6 +6,8 @@ use std::{thread, time::Duration};
 use crate::{cmd, config, git, tmux};
 use tracing::{debug, info, trace, warn};
 
+const WINDOW_CLOSE_DELAY_MS: u64 = 300;
+
 /// Result of creating a worktree
 pub struct CreateResult {
     pub worktree_path: PathBuf,
@@ -32,6 +34,7 @@ pub struct CleanupResult {
     pub local_branch_deleted: bool,
     pub remote_branch_deleted: bool,
     pub remote_delete_error: Option<String>,
+    pub ran_inside_target_window: bool,
 }
 
 /// Options for setting up a worktree environment
@@ -551,7 +554,7 @@ pub fn merge(
         branch = branch_to_merge,
         delete_remote, "merge:cleanup start"
     );
-    cleanup(
+    let cleanup_result = cleanup(
         prefix,
         &branch_to_merge,
         &worktree_path,
@@ -563,6 +566,8 @@ pub fn merge(
     if tmux::is_running()? && tmux::window_exists(prefix, &main_branch)? {
         tmux::select_window(prefix, &main_branch)?;
     }
+
+    schedule_window_close_if_needed(prefix, &branch_to_merge, &cleanup_result);
 
     Ok(MergeResult {
         branch_merged: branch_to_merge,
@@ -605,12 +610,14 @@ pub fn remove(
     // The CLI provides a user-friendly confirmation prompt before calling this function
     let prefix = config.window_prefix();
     info!(branch = branch_name, delete_remote, "remove:cleanup start");
-    cleanup(prefix, branch_name, &worktree_path, force, delete_remote)?;
+    let cleanup_result = cleanup(prefix, branch_name, &worktree_path, force, delete_remote)?;
 
     // Navigate to the main branch window if it exists
     if tmux::is_running()? && tmux::window_exists(prefix, &main_branch)? {
         tmux::select_window(prefix, &main_branch)?;
     }
+
+    schedule_window_close_if_needed(prefix, branch_name, &cleanup_result);
 
     Ok(RemoveResult {
         branch_removed: branch_name.to_string(),
@@ -641,90 +648,133 @@ pub fn cleanup(
     std::env::set_current_dir(&main_worktree_root)
         .context("Could not change directory to main worktree root")?;
 
+    let tmux_running = tmux::is_running().unwrap_or(false);
+    let running_inside_target_window = if tmux_running {
+        match tmux::current_window_name() {
+            Ok(Some(current_name)) => current_name == tmux::prefixed(prefix, branch_name),
+            _ => false,
+        }
+    } else {
+        false
+    };
+
     let mut result = CleanupResult {
         tmux_window_killed: false,
         worktree_removed: false,
         local_branch_deleted: false,
         remote_branch_deleted: false,
         remote_delete_error: None,
+        ran_inside_target_window: running_inside_target_window,
     };
 
-    // 1. Kill tmux window to release any shell locks on the directory.
-    if tmux::is_running().unwrap_or(false)
-        && tmux::window_exists(prefix, branch_name).unwrap_or(false)
-    {
-        tmux::kill_window(prefix, branch_name).context("Failed to kill tmux window")?;
-        result.tmux_window_killed = true;
-        info!(branch = branch_name, "cleanup:tmux window killed");
-
-        // Poll to confirm the window is gone before proceeding. This prevents a race
-        // condition where we try to delete the directory before the shell inside
-        // the tmux window has terminated.
-        const MAX_RETRIES: u32 = 20;
-        const RETRY_DELAY: Duration = Duration::from_millis(50);
-        let mut window_is_gone = false;
-        for _ in 0..MAX_RETRIES {
-            if !tmux::window_exists(prefix, branch_name)? {
-                window_is_gone = true;
-                break;
-            }
-            thread::sleep(RETRY_DELAY);
-        }
-
-        if !window_is_gone {
-            // The window did not close in time. Proceeding may fail, but we let it
-            // try. With logging, this warning will be critical for diagnosis.
-            warn!(
-                branch = branch_name,
-                "cleanup:tmux window did not close within retry budget"
-            );
-            eprintln!(
-                "Warning: tmux window for '{}' did not close in the allotted time. \
-                Filesystem cleanup may fail.",
-                branch_name
-            );
-        }
-    }
-
-    // 2. Forcefully remove the worktree directory from the filesystem.
-    // This is more reliable than `git worktree remove`, which can fail if the directory is in use.
-    if worktree_path.exists() {
-        std::fs::remove_dir_all(worktree_path).with_context(|| {
-            format!(
-                "Failed to remove worktree directory at {}. \
+    // Helper closure to perform the actual filesystem and git cleanup.
+    // This avoids code duplication while enforcing the correct operational order.
+    let perform_fs_git_cleanup = |result: &mut CleanupResult| -> Result<()> {
+        // 1. Forcefully remove the worktree directory from the filesystem.
+        if worktree_path.exists() {
+            std::fs::remove_dir_all(worktree_path).with_context(|| {
+                format!(
+                    "Failed to remove worktree directory at {}. \
                 Please close any terminals or editors using this directory and try again.",
-                worktree_path.display()
-            )
-        })?;
-        result.worktree_removed = true;
-        info!(branch = branch_name, path = %worktree_path.display(), "cleanup:worktree directory removed");
-    }
+                    worktree_path.display()
+                )
+            })?;
+            result.worktree_removed = true;
+            info!(branch = branch_name, path = %worktree_path.display(), "cleanup:worktree directory removed");
+        }
 
-    // 3. Prune worktrees. This cleans up git's metadata by removing the reference
-    // to the directory we just deleted. This must happen *after* directory removal.
-    git::prune_worktrees().context("Failed to prune worktrees")?;
-    debug!("cleanup:git worktrees pruned");
+        // 2. Prune worktrees to clean up git's metadata.
+        git::prune_worktrees().context("Failed to prune worktrees")?;
+        debug!("cleanup:git worktrees pruned");
 
-    // 4. Delete the local branch.
-    git::delete_branch(branch_name, force).context("Failed to delete local branch")?;
-    result.local_branch_deleted = true;
-    info!(branch = branch_name, "cleanup:local branch deleted");
+        // 3. Delete the local branch.
+        git::delete_branch(branch_name, force).context("Failed to delete local branch")?;
+        result.local_branch_deleted = true;
+        info!(branch = branch_name, "cleanup:local branch deleted");
 
-    // 5. Delete the remote branch if requested.
-    if delete_remote {
-        match git::delete_remote_branch(branch_name) {
-            Ok(_) => {
-                result.remote_branch_deleted = true;
-                info!(branch = branch_name, "cleanup:remote branch deleted");
-            }
-            Err(e) => {
-                warn!(branch = branch_name, error = %e, "cleanup:failed to delete remote branch");
-                result.remote_delete_error = Some(e.to_string());
+        // 4. Delete the remote branch if requested.
+        if delete_remote {
+            match git::delete_remote_branch(branch_name) {
+                Ok(_) => {
+                    result.remote_branch_deleted = true;
+                    info!(branch = branch_name, "cleanup:remote branch deleted");
+                }
+                Err(e) => {
+                    warn!(branch = branch_name, error = %e, "cleanup:failed to delete remote branch");
+                    result.remote_delete_error = Some(e.to_string());
+                }
             }
         }
+        Ok(())
+    };
+
+    if running_inside_target_window {
+        info!(
+            branch = branch_name,
+            "cleanup:deferring tmux window kill because command is running inside the window"
+        );
+        // Perform all filesystem and git cleanup *before* returning. The caller
+        // will then schedule the asynchronous window close.
+        perform_fs_git_cleanup(&mut result)?;
+    } else {
+        // Not running inside the target window, so we kill the window first
+        // to release any shell locks on the directory.
+        if tmux_running && tmux::window_exists(prefix, branch_name).unwrap_or(false) {
+            tmux::kill_window(prefix, branch_name).context("Failed to kill tmux window")?;
+            result.tmux_window_killed = true;
+            info!(branch = branch_name, "cleanup:tmux window killed");
+
+            // Poll to confirm the window is gone before proceeding. This prevents a race
+            // condition where we try to delete the directory before the shell inside
+            // the tmux window has terminated.
+            const MAX_RETRIES: u32 = 20;
+            const RETRY_DELAY: Duration = Duration::from_millis(50);
+            let mut window_is_gone = false;
+            for _ in 0..MAX_RETRIES {
+                if !tmux::window_exists(prefix, branch_name)? {
+                    window_is_gone = true;
+                    break;
+                }
+                thread::sleep(RETRY_DELAY);
+            }
+
+            if !window_is_gone {
+                warn!(
+                    branch = branch_name,
+                    "cleanup:tmux window did not close within retry budget"
+                );
+                eprintln!(
+                    "Warning: tmux window for '{}' did not close in the allotted time. \
+                    Filesystem cleanup may fail.",
+                    branch_name
+                );
+            }
+        }
+        // Now that the window is gone, it's safe to clean up the filesystem and git state.
+        perform_fs_git_cleanup(&mut result)?;
     }
 
     Ok(result)
+}
+
+fn schedule_window_close_if_needed(
+    prefix: &str,
+    branch_name: &str,
+    cleanup_result: &CleanupResult,
+) {
+    if !cleanup_result.ran_inside_target_window {
+        return;
+    }
+
+    let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
+    match tmux::schedule_window_close(prefix, branch_name, delay) {
+        Ok(_) => info!(branch = branch_name, "cleanup:tmux window close scheduled"),
+        Err(e) => warn!(
+            branch = branch_name,
+            error = %e,
+            "cleanup:failed to schedule tmux window close",
+        ),
+    }
 }
 
 /// List all worktrees with their status
