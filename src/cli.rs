@@ -143,18 +143,12 @@ enum Commands {
     },
 
     /// Remove a worktree, tmux window, and branch without merging
+    #[command(visible_alias = "rm")]
     Remove(RemoveArgs),
 
-    /// Remove a worktree, tmux window, and branch without merging
-    #[command(hide = true)]
-    Rm(RemoveArgs),
-
     /// List all worktrees
+    #[command(visible_alias = "ls")]
     List,
-
-    /// List all worktrees
-    #[command(hide = true)]
-    Ls,
 
     /// Generate example .workmux.yaml configuration file
     Init,
@@ -203,10 +197,10 @@ pub fn run() -> Result<()> {
             rebase,
             squash,
         ),
-        Commands::Remove(args) | Commands::Rm(args) => {
+        Commands::Remove(args) => {
             remove_worktree(args.branch_name.as_deref(), args.force, args.delete_remote)
         }
-        Commands::List | Commands::Ls => list_worktrees(),
+        Commands::List => list_worktrees(),
         Commands::Init => config::Config::init(),
         Commands::Claude { command } => match command {
             ClaudeCommands::Prune => prune_claude_config(),
