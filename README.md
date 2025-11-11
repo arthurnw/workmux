@@ -101,8 +101,8 @@ window_prefix: wm-
 panes:
   - command: nvim .
     focus: true
-  - command: clear
-    split: horizontal
+  # Just a default shell (command omitted)
+  - split: horizontal
 post_create:
   - mise install
 files:
@@ -139,7 +139,8 @@ panes:
   root)
 - `window_prefix`: Prefix for tmux window names (default: `wm-`)
 - `panes`: Array of pane configurations
-  - `command`: Command to run in the pane
+  - `command`: Optional command to run when the pane is created. If omitted,
+    the pane starts with your default shell.
   - `focus`: Whether this pane should receive focus (default: false)
   - `split`: How to split from previous pane (`horizontal` or `vertical`)
 - `post_create`: Commands to run after worktree creation (in the new worktree
@@ -154,7 +155,7 @@ panes:
   project by default
 - If no `panes` configuration is defined, workmux provides sensible defaults:
   - For projects with a `CLAUDE.md` file: Opens `claude` in the first pane
-  - For all other projects: Opens your default shell (`$SHELL`)
+  - For all other projects: Opens your default shell
   - Both configurations include a second pane split horizontally
 - If no `post_create` configuration is defined, workmux automatically detects
   your package manager and runs the appropriate install command:

@@ -48,8 +48,11 @@ pub struct Config {
 /// Configuration for a single tmux pane
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PaneConfig {
-    /// Command to run in this pane
-    pub command: String,
+    /// A command to run when the pane is created. The pane will remain open
+    /// with an interactive shell after the command completes. If not provided,
+    /// the pane will start with the default shell.
+    #[serde(default)]
+    pub command: Option<String>,
 
     /// Whether this pane should receive focus after creation
     #[serde(default)]
@@ -58,6 +61,12 @@ pub struct PaneConfig {
     /// Split direction from the previous pane (horizontal or vertical)
     #[serde(default)]
     pub split: Option<SplitDirection>,
+
+    /// The 0-based index of the pane to split.
+    /// If not specified, splits the most recently created pane.
+    /// Only used when `split` is specified.
+    #[serde(default)]
+    pub target: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -65,6 +74,34 @@ pub struct PaneConfig {
 pub enum SplitDirection {
     Horizontal,
     Vertical,
+}
+
+/// Validate pane configuration
+pub fn validate_panes_config(panes: &[PaneConfig]) -> anyhow::Result<()> {
+    for (i, pane) in panes.iter().enumerate() {
+        // First pane cannot have a split
+        if i == 0 && pane.split.is_some() {
+            anyhow::bail!("First pane (index 0) cannot have a 'split' direction.");
+        }
+
+        // Subsequent panes must have a split
+        if i > 0 && pane.split.is_none() {
+            anyhow::bail!("Pane {} must have a 'split' direction specified.", i);
+        }
+
+        // If target is specified, validate it's a valid index
+        if let Some(target) = pane.target
+            && target >= i
+        {
+            anyhow::bail!(
+                "Pane {} has invalid target {}. Target must reference a previously created pane (0-{}).",
+                i,
+                target,
+                i.saturating_sub(1)
+            );
+        }
+    }
+    Ok(())
 }
 
 impl Config {
@@ -200,17 +237,18 @@ impl Config {
 
     /// Get default panes.
     fn default_panes() -> Vec<PaneConfig> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
         vec![
             PaneConfig {
-                command: shell,
+                command: None, // Default shell
                 focus: true,
                 split: None,
+                target: None,
             },
             PaneConfig {
-                command: "clear".to_string(),
+                command: Some("clear".to_string()),
                 focus: false,
                 split: Some(SplitDirection::Horizontal),
+                target: None, // Splits most recent (pane 0)
             },
         ]
     }
@@ -219,14 +257,16 @@ impl Config {
     fn claude_default_panes() -> Vec<PaneConfig> {
         vec![
             PaneConfig {
-                command: "claude".to_string(),
+                command: Some("claude".to_string()),
                 focus: true,
                 split: None,
+                target: None,
             },
             PaneConfig {
-                command: "clear".to_string(),
+                command: Some("clear".to_string()),
                 focus: false,
                 split: Some(SplitDirection::Horizontal),
+                target: None, // Splits most recent (pane 0)
             },
         ]
     }
@@ -272,12 +312,18 @@ impl Config {
   # - pnpm install
 
 # Custom tmux pane layout for this project.
-# Default: A two-pane layout with your $SHELL
+# Default: A two-pane layout with a shell and clear command
 # panes:
-#   - command: $SHELL
+#   # Run vim; when it exits, a shell will remain
+#   - command: vim .
 #     focus: true
+#
+#   # Just a default shell (command is omitted)
+#   - split: horizontal
+#
+#   # Run a command that exits immediately
 #   - command: clear
-#     split: horizontal
+#     split: vertical
 
 # File operations to perform when creating a worktree.
 files:

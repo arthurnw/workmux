@@ -51,6 +51,11 @@ pub fn create(
 ) -> Result<CreateResult> {
     info!(branch = branch_name, base = ?base_branch, "create:start");
 
+    // Validate pane config before any other operations
+    if let Some(panes) = &config.panes {
+        config::validate_panes_config(panes)?;
+    }
+
     // Pre-flight checks
     if !git::is_git_repo()? {
         return Err(anyhow!("Not in a git repository"));
@@ -171,6 +176,12 @@ pub fn open(
     config: &config::Config,
 ) -> Result<CreateResult> {
     info!(branch = branch_name, run_hooks, force_files, "open:start");
+
+    // Validate pane config before any other operations
+    if let Some(panes) = &config.panes {
+        config::validate_panes_config(panes)?;
+    }
+
     // Pre-flight checks
     if !git::is_git_repo()? {
         return Err(anyhow!("Not in a git repository"));
