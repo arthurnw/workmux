@@ -143,7 +143,7 @@ pub fn build_startup_command(command: Option<&str>) -> Result<Option<String>> {
     let escaped_command = command.replace('\'', r#"'\''"#);
 
     let full_command = format!(
-        "{shell} -c '{escaped_command}; exec {shell}'",
+        "{shell} -ic '{escaped_command}; exec {shell}'",
         shell = shell,
         escaped_command = escaped_command
     );

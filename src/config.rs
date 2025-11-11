@@ -127,7 +127,6 @@ impl Config {
                         config.panes = Some(Self::default_panes());
                     }
                 }
-
             } else {
                 // Apply fallback defaults for when not in a git repo (e.g., `workmux init`).
                 if config.panes.is_none() {
