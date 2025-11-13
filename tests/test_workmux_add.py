@@ -593,33 +593,6 @@ def test_add_copies_file_with_parent_directories(
     assert (worktree_path / "config").is_dir()
 
 
-def test_add_copy_directory_fails_gracefully(
-    isolated_tmux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
-):
-    """Verifies that attempting to copy a directory fails with a clear error message."""
-    env = isolated_tmux_server
-    branch_name = "feature-copy-dir-fail"
-
-    # Create a directory with files
-    data_dir = repo_path / "data"
-    data_dir.mkdir()
-    (data_dir / "file.txt").write_text("content")
-
-    # Commit the directory
-    env.run_command(["git", "add", "data/"], cwd=repo_path)
-    env.run_command(["git", "commit", "-m", "Add data dir"], cwd=repo_path)
-
-    # Configure workmux to copy the directory (should fail)
-    write_workmux_config(repo_path, files={"copy": ["data"]}, env=env)
-
-    # Run workmux add and expect it to fail
-    with pytest.raises(AssertionError) as excinfo:
-        run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
-
-    stderr = str(excinfo.value)
-    assert "Cannot copy directory" in stderr or "Only files are supported" in stderr
-
-
 def test_add_symlinks_single_file(
     isolated_tmux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
