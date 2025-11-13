@@ -219,6 +219,12 @@ immediately. If the branch doesn't exist, it will be created automatically.
 
 - `<branch-name>`: Name of the branch to create or switch to.
 
+**Common options:**
+
+- `--base <branch|commit|tag>`: Specify a base branch, commit, or tag to branch from
+  when creating a new branch. By default, new branches are created from your main
+  branch's remote tracking branch (e.g., `origin/main`).
+
 **What happens:**
 
 1. Creates a git worktree at
@@ -241,6 +247,9 @@ workmux add existing-work
 
 # Branch names with slashes work too
 workmux add feature/new-api
+
+# Create a new branch from a specific base
+workmux add hotfix --base production
 ```
 
 ---
