@@ -10,7 +10,6 @@ use fs_extra::dir as fs_dir;
 use fs_extra::file as fs_file;
 
 const WINDOW_CLOSE_DELAY_MS: u64 = 300;
-const PROMPT_FILE_NAME: &str = "PROMPT.md";
 
 /// Result of creating a worktree
 pub struct CreateResult {
@@ -196,7 +195,7 @@ pub fn create(
 
     // Setup the rest of the environment (tmux, files, hooks)
     let prompt_file_path = if let Some(p) = prompt {
-        Some(write_prompt_file(&worktree_path, p)?)
+        Some(write_prompt_file(branch_name, p)?)
     } else {
         None
     };
@@ -891,6 +890,16 @@ pub fn cleanup(
             info!(branch = branch_name, path = %worktree_path.display(), "cleanup:worktree directory removed");
         }
 
+        // Clean up the prompt file if it exists
+        let prompt_file = PathBuf::from(format!("/tmp/workmux-prompt-{}.md", branch_name));
+        if prompt_file.exists() {
+            if let Err(e) = std::fs::remove_file(&prompt_file) {
+                warn!(path = %prompt_file.display(), error = %e, "cleanup:failed to remove prompt file");
+            } else {
+                debug!(path = %prompt_file.display(), "cleanup:prompt file removed");
+            }
+        }
+
         // 2. Prune worktrees to clean up git's metadata.
         git::prune_worktrees().context("Failed to prune worktrees")?;
         debug!("cleanup:git worktrees pruned");
@@ -1053,14 +1062,15 @@ pub fn list(config: &config::Config) -> Result<Vec<WorktreeInfo>> {
 
     Ok(worktrees)
 }
-fn write_prompt_file(worktree_path: &Path, prompt: &cli::Prompt) -> Result<PathBuf> {
+fn write_prompt_file(branch_name: &str, prompt: &cli::Prompt) -> Result<PathBuf> {
     let content = match prompt {
         cli::Prompt::Inline(text) => text.clone(),
         cli::Prompt::FromFile(path) => fs::read_to_string(path)
             .with_context(|| format!("Failed to read prompt file '{}'", path.display()))?,
     };
 
-    let prompt_path = worktree_path.join(PROMPT_FILE_NAME);
+    // Write to /tmp instead of the worktree to avoid polluting git status
+    let prompt_path = PathBuf::from(format!("/tmp/workmux-prompt-{}.md", branch_name));
     fs::write(&prompt_path, content)
         .with_context(|| format!("Failed to write prompt file '{}'", prompt_path.display()))?;
     Ok(prompt_path)

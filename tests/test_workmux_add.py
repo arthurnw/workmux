@@ -105,7 +105,9 @@ printf '%s' "$1" > "{output_filename}"
     )
 
     worktree_path = get_worktree_path(repo_path, branch_name)
-    prompt_file = worktree_path / "PROMPT.md"
+    # Prompt file is now written to /tmp instead of the worktree
+    prompt_file = Path(f"/tmp/workmux-prompt-{branch_name}.md")
+    assert prompt_file.exists(), f"Prompt file not found at {prompt_file}"
     assert prompt_file.read_text() == prompt_text
 
     agent_output = worktree_path / output_filename
@@ -170,7 +172,9 @@ printf '%s' "$2" > "{output_filename}"
     )
 
     worktree_path = get_worktree_path(repo_path, branch_name)
-    prompt_file = worktree_path / "PROMPT.md"
+    # Prompt file is now written to /tmp instead of the worktree
+    prompt_file = Path(f"/tmp/workmux-prompt-{branch_name}.md")
+    assert prompt_file.exists(), f"Prompt file not found at {prompt_file}"
     assert prompt_file.read_text() == prompt_source.read_text()
 
     agent_output = worktree_path / output_filename
@@ -213,7 +217,11 @@ def test_add_without_prompt_skips_prompt_file(
     run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
 
     worktree_path = get_worktree_path(repo_path, branch_name)
+    # Verify no PROMPT.md in worktree
     assert not (worktree_path / "PROMPT.md").exists()
+    # Verify no prompt file in /tmp either
+    prompt_file = Path(f"/tmp/workmux-prompt-{branch_name}.md")
+    assert not prompt_file.exists()
 
 
 def test_add_executes_pane_commands(
