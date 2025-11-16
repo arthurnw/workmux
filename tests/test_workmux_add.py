@@ -472,6 +472,60 @@ alias testcmd='echo "{alias_output}"'
     )
 
 
+def test_agent_placeholder_respects_shell_aliases(
+    isolated_tmux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    """Verifies that the <agent> placeholder triggers aliases defined in shell rc files."""
+    env = isolated_tmux_server
+    branch_name = "feature-agent-alias"
+    marker_content = "alias_was_expanded"
+
+    (env.home_path / ".zshrc").write_text(
+        """
+alias claude='claude --aliased'
+""".strip()
+        + "\n"
+    )
+
+    install_fake_agent(
+        env,
+        "claude",
+        f"""#!/bin/sh
+set -e
+for arg in "$@"; do
+  if [ "$arg" = "--aliased" ]; then
+    echo "{marker_content}" > alias_marker.txt
+    exit 0
+  fi
+done
+echo "Alias flag not found" > alias_marker.txt
+exit 1
+""",
+    )
+
+    write_workmux_config(repo_path, agent="claude", panes=[{"command": "<agent>"}])
+
+    shell_path = os.environ.get("SHELL", "/bin/zsh")
+    pre_cmds = [["set-option", "-g", "default-shell", shell_path]]
+
+    run_workmux_add(
+        env, workmux_exe_path, repo_path, branch_name, pre_run_tmux_cmds=pre_cmds
+    )
+
+    worktree_path = get_worktree_path(repo_path, branch_name)
+    marker_file = worktree_path / "alias_marker.txt"
+
+    def alias_marker_exists():
+        return marker_file.exists()
+
+    assert poll_until(alias_marker_exists, timeout=2.0), (
+        "Agent marker file missing; alias likely not executed."
+    )
+    assert (
+        marker_file.read_text().strip() == marker_content
+    ), "Alias marker content incorrect; alias flag not detected."
+
+
 def test_project_config_overrides_global_config(
     isolated_tmux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
@@ -820,9 +874,9 @@ def test_add_errors_when_detached_head_without_base(
 
     write_workmux_config(repo_path)
 
-    head_sha = (
-        env.run_command(["git", "rev-parse", "HEAD"], cwd=repo_path).stdout.strip()
-    )
+    head_sha = env.run_command(
+        ["git", "rev-parse", "HEAD"], cwd=repo_path
+    ).stdout.strip()
     env.run_command(["git", "checkout", head_sha], cwd=repo_path)
 
     result = run_workmux_command(
@@ -843,9 +897,9 @@ def test_add_allows_detached_head_with_explicit_base(
     write_workmux_config(repo_path)
     create_commit(env, repo_path, commit_message)
 
-    head_sha = (
-        env.run_command(["git", "rev-parse", "HEAD"], cwd=repo_path).stdout.strip()
-    )
+    head_sha = env.run_command(
+        ["git", "rev-parse", "HEAD"], cwd=repo_path
+    ).stdout.strip()
     env.run_command(["git", "checkout", head_sha], cwd=repo_path)
 
     run_workmux_command(
@@ -858,6 +912,7 @@ def test_add_allows_detached_head_with_explicit_base(
         / f"file_for_{commit_message.replace(' ', '_').replace(':', '')}.txt"
     )
     assert expected_file.exists()
+
 
 def test_add_reuses_existing_branch(
     isolated_tmux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path

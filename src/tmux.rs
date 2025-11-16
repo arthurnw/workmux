@@ -159,8 +159,22 @@ pub fn build_startup_command(command: Option<&str>) -> Result<Option<String>> {
     // We must escape single quotes within the user command using POSIX-style escaping.
     let escaped_command = command.replace('\'', r#"'\''"#);
 
+
+    // A new pane's interactive shell can have a different `PATH` than the tmux server,
+    // especially after sourcing rc files (`.zshrc`, etc.). This can lead to "command not found"
+    // errors for executables that `workmux` can resolve but the pane's shell cannot.
+    //
+    // To ensure consistency, explicitly fetch the tmux server's global `PATH` and
+    // prepend it to the pane's `PATH` before executing the user's command. This
+    // guarantees that agents and other tools are discoverable.
+    let command_prologue = crate::config::tmux_global_path().map(|tmux_path| {
+        let escaped_path = tmux_path.replace('\'', r#"'\''"#);
+        format!("export PATH='{}':$PATH; ", escaped_path)
+    });
+
     let inner_command = format!(
-        "{pre_hook}; {user_cmd}; exec {shell} -l",
+        "{prologue}{pre_hook}; {user_cmd}; exec {shell} -l",
+        prologue = command_prologue.as_deref().unwrap_or(""),
         pre_hook = pre_command_hook,
         user_cmd = escaped_command,
         shell = shell_path,
@@ -376,37 +390,34 @@ fn rewrite_agent_command(
     working_dir: &Path,
     config: &crate::config::Config,
 ) -> Option<String> {
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
+    let trimmed_command = command.trim();
+    if trimmed_command.is_empty() {
         return None;
     }
 
-    let (first_token, rest) = split_first_token(trimmed)?;
-
-    // Extract the agent name from the command (handles paths like /usr/local/bin/claude)
-    let agent_name_from_command = std::path::Path::new(first_token)
-        .file_name()
-        .and_then(|s| s.to_str());
-
-    // The agent from config. This is guaranteed to be Some.
+    let (pane_token, pane_rest) = crate::config::split_first_token(trimmed_command)?;
     let configured_agent_str = config.agent.as_deref().unwrap_or("claude");
-    let configured_agent_name = std::path::Path::new(configured_agent_str)
-        .file_name()
-        .and_then(|s| s.to_str());
+    let (config_token, _) = crate::config::split_first_token(configured_agent_str)?;
 
-    // Only rewrite if the command is for the configured agent
-    if agent_name_from_command != configured_agent_name {
+    let resolved_pane_path = crate::config::resolve_executable_path(pane_token)
+        .unwrap_or_else(|| pane_token.to_string());
+    let resolved_config_path = crate::config::resolve_executable_path(config_token)
+        .unwrap_or_else(|| config_token.to_string());
+
+    let pane_stem = Path::new(&resolved_pane_path).file_stem();
+    let config_stem = Path::new(&resolved_config_path).file_stem();
+
+    if pane_stem != config_stem {
         return None;
     }
 
     let relative = prompt_file.strip_prefix(working_dir).unwrap_or(prompt_file);
     let prompt_path = relative.to_string_lossy();
-    let rest = rest.trim_start();
+    let rest = pane_rest.trim_start();
 
-    let rewritten = match agent_name_from_command {
+    let rewritten = match pane_stem.and_then(|s| s.to_str()) {
         Some("gemini") => {
-            // gemini needs -i flag for interactive mode after prompt
-            let mut cmd = format!("{} -i \"$(cat {})\"", first_token, prompt_path);
+            let mut cmd = format!("{} -i \"$(cat {})\"", pane_token, prompt_path);
             if !rest.is_empty() {
                 cmd.push(' ');
                 cmd.push_str(rest);
@@ -414,8 +425,7 @@ fn rewrite_agent_command(
             cmd
         }
         Some(_) => {
-            // Default for claude, codex, and any other agent
-            let mut cmd = format!("{} \"$(cat {})\"", first_token, prompt_path);
+            let mut cmd = format!("{} \"$(cat {})\"", pane_token, prompt_path);
             if !rest.is_empty() {
                 cmd.push(' ');
                 cmd.push_str(rest);
@@ -426,20 +436,6 @@ fn rewrite_agent_command(
     };
 
     Some(rewritten)
-}
-
-fn split_first_token(command: &str) -> Option<(&str, &str)> {
-    let trimmed = command.trim_start();
-    if trimmed.is_empty() {
-        return None;
-    }
-    // `split_once` finds the first whitespace and splits there
-    // If no whitespace found, returns None, so we treat whole string as first token
-    Some(
-        trimmed
-            .split_once(char::is_whitespace)
-            .unwrap_or((trimmed, "")),
-    )
 }
 
 #[cfg(test)]
@@ -544,44 +540,5 @@ mod tests {
 
         let result = rewrite_agent_command("", &prompt_file, &working_dir, &config);
         assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_split_first_token_single_word() {
-        assert_eq!(split_first_token("claude"), Some(("claude", "")));
-    }
-
-    #[test]
-    fn test_split_first_token_with_args() {
-        assert_eq!(
-            split_first_token("claude --verbose"),
-            Some(("claude", "--verbose"))
-        );
-    }
-
-    #[test]
-    fn test_split_first_token_multiple_spaces() {
-        assert_eq!(
-            split_first_token("claude   --verbose"),
-            Some(("claude", "  --verbose"))
-        );
-    }
-
-    #[test]
-    fn test_split_first_token_leading_whitespace() {
-        assert_eq!(
-            split_first_token("  claude --verbose"),
-            Some(("claude", "--verbose"))
-        );
-    }
-
-    #[test]
-    fn test_split_first_token_empty_string() {
-        assert_eq!(split_first_token(""), None);
-    }
-
-    #[test]
-    fn test_split_first_token_only_whitespace() {
-        assert_eq!(split_first_token("   "), None);
     }
 }

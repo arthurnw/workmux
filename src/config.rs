@@ -155,10 +155,8 @@ impl Config {
             .or_else(|| global_config.agent.clone())
             .unwrap_or_else(|| "claude".to_string());
 
-        let resolved_agent = resolve_agent_command(&final_agent);
-
         let mut config = global_config.merge(project_config);
-        config.agent = Some(resolved_agent);
+        config.agent = Some(final_agent);
 
         // After merging, apply sensible defaults for any values that are not configured.
         let needs_defaults = config.panes.is_none() || config.pre_delete.is_none();
@@ -419,29 +417,13 @@ files:
     }
 }
 
-fn resolve_agent_command(agent: &str) -> String {
-    let Some((executable, rest)) = split_first_token(agent) else {
-        return agent.to_string();
-    };
-
-    let trimmed_rest = rest.trim_start();
-    let resolved_executable =
-        resolve_executable_path(executable).unwrap_or_else(|| executable.to_string());
-
-    if trimmed_rest.is_empty() {
-        resolved_executable
-    } else {
-        format!("{} {}", resolved_executable, trimmed_rest)
-    }
-}
-
 /// Resolves an executable name or path to its full absolute path.
 ///
 /// For absolute paths, returns as-is. For relative paths, resolves against current directory.
 /// For plain executable names (e.g., "claude"), searches first in tmux's global PATH
 /// (since panes will run in tmux's environment), then falls back to the current shell's PATH.
 /// Returns None if the executable cannot be found.
-fn resolve_executable_path(executable: &str) -> Option<String> {
+pub fn resolve_executable_path(executable: &str) -> Option<String> {
     let exec_path = Path::new(executable);
 
     if exec_path.is_absolute() {
@@ -471,7 +453,7 @@ fn resolve_executable_path(executable: &str) -> Option<String> {
     None
 }
 
-fn tmux_global_path() -> Option<String> {
+pub fn tmux_global_path() -> Option<String> {
     let output = cmd::Cmd::new("tmux")
         .args(&["show-environment", "-g", "PATH"])
         .run_and_capture_stdout()
@@ -479,7 +461,7 @@ fn tmux_global_path() -> Option<String> {
     output.strip_prefix("PATH=").map(|s| s.to_string())
 }
 
-fn split_first_token(command: &str) -> Option<(&str, &str)> {
+pub fn split_first_token(command: &str) -> Option<(&str, &str)> {
     let trimmed = command.trim_start();
     if trimmed.is_empty() {
         return None;
@@ -489,4 +471,48 @@ fn split_first_token(command: &str) -> Option<(&str, &str)> {
             .split_once(char::is_whitespace)
             .unwrap_or((trimmed, "")),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_first_token;
+
+    #[test]
+    fn split_first_token_single_word() {
+        assert_eq!(split_first_token("claude"), Some(("claude", "")));
+    }
+
+    #[test]
+    fn split_first_token_with_args() {
+        assert_eq!(
+            split_first_token("claude --verbose"),
+            Some(("claude", "--verbose"))
+        );
+    }
+
+    #[test]
+    fn split_first_token_multiple_spaces() {
+        assert_eq!(
+            split_first_token("claude   --verbose"),
+            Some(("claude", "  --verbose"))
+        );
+    }
+
+    #[test]
+    fn split_first_token_leading_whitespace() {
+        assert_eq!(
+            split_first_token("  claude --verbose"),
+            Some(("claude", "--verbose"))
+        );
+    }
+
+    #[test]
+    fn split_first_token_empty_string() {
+        assert_eq!(split_first_token(""), None);
+    }
+
+    #[test]
+    fn split_first_token_only_whitespace() {
+        assert_eq!(split_first_token("   "), None);
+    }
 }
