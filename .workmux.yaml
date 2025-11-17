@@ -1,8 +1,9 @@
 panes:
-  - command: <agent>
+  - command: <agent> # Start the configured agent (e.g., claude)
     focus: true
-  - split: horizontal
+  - split: horizontal # Second pane with default shell
 
+# Commands run after worktree creation (blocks window creation, keep fast)
 post_create:
   - python -m venv tests/venv
   - source tests/venv/bin/activate && pip install --disable-pip-version-check -r tests/requirements.txt
@@ -10,4 +11,4 @@ post_create:
 files:
   symlink:
     - CLAUDE.md
-    - target
+    - target # Share Rust build cache for faster compilation
