@@ -5,9 +5,11 @@ panes:
 
 # Commands run after worktree creation (blocks window creation, keep fast)
 post_create:
-  - mise use # Activate mise for this worktree (Rust toolchain)
+  - direnv allow # Allow direnv to activate mise for this worktree
 
 files:
+  copy:
+    - .envrc # Copy direnv config (might need per-worktree customization)
   symlink:
     - CLAUDE.md
     - tests/venv # Share Python venv for faster worktree creation
