@@ -101,13 +101,14 @@ impl AgentState {
     /// Convert to AgentPane for dashboard display.
     ///
     /// Requires session/window info from multiplexer since we don't store those.
-    pub fn to_agent_pane(&self, session: String, window_name: String) -> AgentPane {
+    /// Uses live_title from multiplexer if available, falls back to stored title.
+    pub fn to_agent_pane(&self, session: String, window_name: String, live_title: Option<String>) -> AgentPane {
         AgentPane {
             session,
             window_name,
             pane_id: self.pane_key.pane_id.clone(),
             path: self.workdir.clone(),
-            pane_title: self.pane_title.clone(),
+            pane_title: live_title.or_else(|| self.pane_title.clone()),
             status: self.status,
             status_ts: self.status_ts,
         }

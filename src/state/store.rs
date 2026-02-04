@@ -190,6 +190,7 @@ impl StateStore {
                     let agent_pane = state.to_agent_pane(
                         live.session.clone().unwrap_or_default(),
                         live.window.clone().unwrap_or_default(),
+                        live.title.clone(),
                     );
                     valid_agents.push(agent_pane);
                 }
