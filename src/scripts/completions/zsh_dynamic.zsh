@@ -65,17 +65,49 @@ _workmux_dynamic() {
         return
     fi
 
+    # Count how many positional arguments have already been provided
+    # Start from position 3 (after command and subcommand)
+    local positional_count=0
+    local i=3
+    local skip_next=false
+    while [[ $i -lt $CURRENT ]]; do
+        local word="${words[$i]}"
+
+        if [[ "$skip_next" == "true" ]]; then
+            skip_next=false
+        elif [[ "$word" == -* ]]; then
+            # This is a flag - check if it takes a value
+            if [[ -n "${arg_flags[(r)$word]}" ]]; then
+                skip_next=true
+            fi
+        else
+            # This is a positional argument
+            ((positional_count++))
+        fi
+        ((i++))
+    done
+
     # Only handle commands that need dynamic completion
     case "$cmd" in
         open|remove|rm|path|merge|close)
-            # Offer handles mixed with any remaining flags
-            _workmux "$@"
-            _workmux_handles
+            # These commands take exactly one positional argument (the handle/branch name)
+            # Only offer completions if we haven't provided it yet
+            if [[ $positional_count -eq 0 ]]; then
+                _workmux_handles
+            else
+                # Already have the positional arg - offer no completions
+                return 0
+            fi
             ;;
         add)
-            # Offer git branches mixed with any remaining flags
-            _workmux "$@"
-            _workmux_git_branches
+            # Add command takes one positional argument (the branch name)
+            # Only offer completions if we haven't provided it yet
+            if [[ $positional_count -eq 0 ]]; then
+                _workmux_git_branches
+            else
+                # Already have the positional arg - offer no completions
+                return 0
+            fi
             ;;
         *)
             # For all other commands, strictly use generated completions
