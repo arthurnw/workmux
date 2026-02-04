@@ -4,6 +4,9 @@ panes:
   - split: horizontal # Second pane with default shell
 
 # Commands run after worktree creation (blocks window creation, keep fast)
+post_create:
+  - mise use # Activate mise for this worktree (Rust toolchain)
+
 files:
   symlink:
     - CLAUDE.md
