@@ -58,6 +58,9 @@ New to worktrees? See [Why git worktrees?](#why-git-worktrees)
 - [Delegate tasks to worktree agents](#delegating-tasks-with-a-custom-command)
   with a `/worktree` slash command
 - [Display Claude agent status in tmux window names](#agent-status-tracking)
+- Auto-trust worktrees in Claude Code and capture session IDs for
+  [`restore`](#workmux-restore)
+- Automatic [direnv integration](#using-direnv) for `.envrc` files
 - Automatically set up your preferred tmux pane layout (editor, shell, watchers,
   etc.)
 - Run post-creation hooks (install dependencies, setup database, etc.)
@@ -324,6 +327,48 @@ status_icons:
 
 Set `status_format: false` to disable automatic tmux format modification
 
+#### Claude Code integration
+
+Configure automatic Claude Code integration:
+
+```yaml
+claude:
+  auto_trust: true # Auto-trust worktree directories in ~/.claude.json
+  capture_sessions: true # Capture session IDs for restoration
+  capture_timeout: 30 # Timeout in seconds for session capture
+```
+
+| Option             | Description                                    | Default |
+| ------------------ | ---------------------------------------------- | ------- |
+| `auto_trust`       | Auto-add worktrees to Claude's trusted list    | `true`  |
+| `capture_sessions` | Capture Claude session IDs for `--resume`      | `true`  |
+| `capture_timeout`  | Seconds to wait for session ID after creation  | `30`    |
+
+When `auto_trust` is enabled, worktrees are automatically added to
+`~/.claude.json` on creation and removed on deletion. This eliminates the
+"Trust this project?" prompt when starting Claude in new worktrees.
+
+When `capture_sessions` is enabled, workmux monitors for new Claude sessions
+after creating a worktree and stores the session ID. Use `workmux restore` to
+reopen worktrees with their sessions resumed.
+
+#### direnv integration
+
+Configure automatic direnv approval:
+
+```yaml
+direnv:
+  auto_allow: true # Auto-run 'direnv allow' when opening worktrees
+```
+
+| Option       | Description                                      | Default |
+| ------------ | ------------------------------------------------ | ------- |
+| `auto_allow` | Run `direnv allow` on worktrees with `.envrc`    | `true`  |
+
+When enabled, workmux automatically runs `direnv allow` when opening worktrees
+that have an `.envrc` file. This eliminates the manual approval step after
+creating worktrees. Silently skips if direnv is not installed.
+
 #### Default behavior
 
 - Worktrees are created in `<project>__worktrees` as a sibling directory to your
@@ -417,6 +462,9 @@ alias wm='workmux'
   worktree)
 - [`path`](#workmux-path-name) - Get the filesystem path of a worktree
 - [`dashboard`](#workmux-dashboard) - Show TUI dashboard of all active agents
+- [`dashboard jump`](#workmux-dashboard-jump) - Switch to dashboard window
+- [`session`](#workmux-session) - Manage Claude session tracking
+- [`restore`](#workmux-restore) - Open all worktrees with session resumption
 - [`init`](#workmux-init) - Generate configuration file
 - [`claude prune`](#workmux-claude-prune) - Clean up stale Claude Code entries
 - [`completions`](#workmux-completions-shell) - Generate shell completions
@@ -1320,6 +1368,110 @@ Then press `prefix + Ctrl-s` to open the dashboard as a tmux popup.
 
 ---
 
+### `workmux dashboard jump`
+
+Switches to a dedicated dashboard window in the `monitor` tmux session. Creates
+the session and window if they don't exist.
+
+This is useful for having a persistent dashboard that you can quickly jump to
+and from without leaving it open in a popup.
+
+#### What happens
+
+1. Creates the `monitor` tmux session if it doesn't exist
+2. Creates or finds the `workmux-dashboard` window running `workmux dashboard`
+3. Switches to the dashboard window (attach if outside tmux, switch-client if
+   inside)
+
+#### Examples
+
+```bash
+# Jump to the dashboard window
+workmux dashboard jump
+```
+
+---
+
+### `workmux session`
+
+Manages Claude session ID tracking for worktrees. Session IDs enable resuming
+Claude conversations when restoring worktrees.
+
+#### Subcommands
+
+- `list`: List all tracked sessions for the current repository
+- `capture <branch> [session-id]`: Manually capture or set a session ID
+
+Session IDs are automatically captured when creating worktrees (if enabled in
+config). Manual capture is useful when you want to associate a session started
+outside of workmux.
+
+#### Examples
+
+```bash
+# List all tracked sessions
+workmux session list
+
+# Auto-detect and capture the most recent session for a branch
+workmux session capture my-feature
+
+# Manually set a specific session ID
+workmux session capture my-feature "550e8400-e29b-41d4-a716-446655440000"
+```
+
+#### Example output
+
+```
+Sessions for my-project:
+  feature-auth  550e8400-e29b-41d4-a716-446655440000  (active)
+  fix-bug       def45678-1234-5678-9abc-def012345678  (active)
+  old-branch    (no session id)                       (worktree removed)
+```
+
+---
+
+### `workmux restore`
+
+Opens all worktrees with optional Claude session resumption. Useful for
+restoring your development environment after a restart or when returning to a
+project.
+
+#### Options
+
+- `--dry-run`: Show what would be done without making changes
+
+#### What happens
+
+1. Finds all worktrees for the current repository
+2. For each worktree without an open tmux window:
+   - Checks for a stored Claude session ID
+   - Opens the worktree with `--resume <session-id>` if available
+   - Opens normally if no session is stored
+3. Reports progress
+
+#### Examples
+
+```bash
+# Restore all worktrees with their Claude sessions
+workmux restore
+
+# Preview what would be restored
+workmux restore --dry-run
+```
+
+#### Example output
+
+```
+Restoring worktrees for my-project...
+  feature-auth: restored with session 550e8400
+  fix-bug: opened (no saved session)
+  old-work: window already exists, skipping
+
+Restore complete: 2 restored, 1 skipped
+```
+
+---
+
 ### `workmux claude prune`
 
 Removes stale entries from Claude config (`~/.claude.json`) that point to
@@ -1855,20 +2007,33 @@ nerdfont: true # or false for unicode fallbacks
 
 ### Using direnv
 
-If your project uses [direnv](https://direnv.net/) for environment management,
-you can configure workmux to automatically set it up in new worktrees:
+workmux automatically runs `direnv allow` when opening worktrees that have an
+`.envrc` file (enabled by default). This means you don't need to manually
+approve direnv after creating worktrees.
+
+If your `.envrc` should be shared across worktrees (instead of each having its
+own copy), symlink it:
 
 ```yaml
 # .workmux.yaml
-post_create:
-  - direnv allow
-
 files:
   symlink:
     - .envrc
 ```
 
+To disable automatic direnv approval:
+
+```yaml
+direnv:
+  auto_allow: false
+```
+
 ### Claude Code permissions
+
+workmux automatically adds worktree directories to Claude's trusted projects
+list (`~/.claude.json`) on creation and removes them on deletion. This
+eliminates the "Trust this project?" prompt when starting Claude in new
+worktrees.
 
 By default, Claude Code prompts for permission before running commands. There
 are several ways to handle this in worktrees:

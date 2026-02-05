@@ -332,7 +332,7 @@ enum Commands {
     /// Show the changelog (what's new in each version)
     Changelog,
 
-    /// Show a TUI dashboard of all active workmux agents across all sessions
+    /// Show a TUI dashboard or manage dashboard windows
     Dashboard {
         /// Preview pane size as percentage (10-90). Larger = more preview, less table.
         #[arg(long, short = 'P', value_parser = clap::value_parser!(u8).range(10..=90))]
@@ -341,6 +341,22 @@ enum Commands {
         /// Open diff view directly for the current worktree
         #[arg(long, short = 'd')]
         diff: bool,
+
+        #[command(subcommand)]
+        command: Option<DashboardCommands>,
+    },
+
+    /// Manage Claude session tracking for worktrees
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
+    },
+
+    /// Open all worktrees with optional Claude session resumption
+    Restore {
+        /// Show what would be done without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Claude Code integration commands
@@ -390,12 +406,57 @@ enum Commands {
     /// Output git branches for shell completion (internal use)
     #[command(hide = true, name = "_complete-git-branches")]
     CompleteGitBranches,
+
+    /// Internal commands (not for direct use)
+    #[command(hide = true, name = "_internal")]
+    Internal {
+        #[command(subcommand)]
+        command: InternalCommands,
+    },
 }
 
 #[derive(Subcommand)]
 enum ClaudeCommands {
     /// Remove stale entries from ~/.claude.json for deleted worktrees
     Prune,
+}
+
+#[derive(Subcommand)]
+enum SessionCommands {
+    /// List all tracked Claude sessions for this repository
+    List,
+
+    /// Manually capture or set a session ID for a branch
+    Capture {
+        /// Branch name to capture session for
+        #[arg(value_parser = WorktreeHandleParser::new())]
+        branch: String,
+
+        /// Session ID to store (auto-detects if not provided)
+        session_id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DashboardCommands {
+    /// Switch to the workmux dashboard window (creates if needed)
+    Jump,
+}
+
+#[derive(Subcommand)]
+enum InternalCommands {
+    /// Capture Claude session ID (background process)
+    #[command(name = "capture-session")]
+    CaptureSession {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        branch: String,
+        #[arg(long)]
+        initial_count: usize,
+        #[arg(long)]
+        timeout: u32,
+    },
 }
 
 /// Check if the command should show the nerdfont setup prompt.
@@ -491,7 +552,26 @@ pub fn run() -> Result<()> {
         Commands::Init => crate::config::Config::init(),
         Commands::Docs => command::docs::run(),
         Commands::Changelog => command::changelog::run(),
-        Commands::Dashboard { preview_size, diff } => command::dashboard::run(preview_size, diff),
+        Commands::Dashboard {
+            preview_size,
+            diff,
+            command,
+        } => {
+            if let Some(cmd) = command {
+                match cmd {
+                    DashboardCommands::Jump => command::dashboard::jump(),
+                }
+            } else {
+                command::dashboard::run(preview_size, diff)
+            }
+        }
+        Commands::Session { command } => match command {
+            SessionCommands::List => command::session::list(),
+            SessionCommands::Capture { branch, session_id } => {
+                command::session::capture(&branch, session_id.as_deref())
+            }
+        },
+        Commands::Restore { dry_run } => command::restore::run(dry_run),
         Commands::Claude { command } => match command {
             ClaudeCommands::Prune => prune_claude_config(),
         },
@@ -521,6 +601,17 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Internal { command } => match command {
+            InternalCommands::CaptureSession {
+                repo,
+                branch,
+                initial_count,
+                timeout,
+            } => {
+                claude::run_capture_loop(&repo, &branch, initial_count, timeout)?;
+                Ok(())
+            }
+        },
     }
 }
 

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 
+use crate::claude;
 use crate::git;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::cleanup;
 use super::context::WorkflowContext;
@@ -78,6 +79,27 @@ pub fn remove(
 
     // Note: Unmerged branch check removed - git branch -d/D handles this natively
     // The CLI provides a user-friendly confirmation prompt before calling this function
+
+    // Untrust the directory from Claude Code
+    if context.config.claude.auto_trust {
+        if let Err(e) = claude::untrust_directory(&worktree_path) {
+            warn!(error = %e, path = %worktree_path.display(), "Failed to untrust directory from Claude");
+        }
+    }
+
+    // Remove session data
+    if context.config.claude.capture_sessions {
+        let repo_name = context
+            .main_worktree_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        if let Err(e) = claude::remove_session(repo_name, &branch_name) {
+            warn!(error = %e, "Failed to remove session data");
+        }
+    }
+
     info!(branch = %branch_name, keep_branch, "remove:cleanup start");
     let cleanup_result = cleanup::cleanup(
         context,

@@ -250,3 +250,63 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool) -> Result<()> {
 
     Ok(())
 }
+
+/// Jump to the workmux dashboard window, creating it if needed.
+pub fn jump() -> Result<()> {
+    let session_name = "monitor";
+    let window_name = "workmux-dashboard";
+
+    // Check if we're inside tmux
+    let inside_tmux = std::env::var("TMUX").is_ok();
+
+    // Ensure monitor session exists
+    let session_exists = crate::cmd::Cmd::new("tmux")
+        .args(&["has-session", "-t", session_name])
+        .run_and_capture_stdout()
+        .is_ok();
+
+    if !session_exists {
+        // Create session with dashboard window
+        crate::cmd::Cmd::new("tmux")
+            .args(&[
+                "new-session",
+                "-d",
+                "-s", session_name,
+                "-n", window_name,
+                "workmux dashboard",
+            ])
+            .run()?;
+    } else {
+        // Check if dashboard window exists in session
+        let windows = crate::cmd::Cmd::new("tmux")
+            .args(&["list-windows", "-t", session_name, "-F", "#{window_name}"])
+            .run_and_capture_stdout()?;
+
+        let has_window = windows.lines().any(|w| w == window_name);
+
+        if !has_window {
+            // Create dashboard window in existing session
+            crate::cmd::Cmd::new("tmux")
+                .args(&[
+                    "new-window",
+                    "-t", session_name,
+                    "-n", window_name,
+                    "workmux dashboard",
+                ])
+                .run()?;
+        }
+    }
+
+    // Switch to the dashboard
+    if inside_tmux {
+        crate::cmd::Cmd::new("tmux")
+            .args(&["switch-client", "-t", &format!("{}:{}", session_name, window_name)])
+            .run()?;
+    } else {
+        crate::cmd::Cmd::new("tmux")
+            .args(&["attach-session", "-t", &format!("{}:{}", session_name, window_name)])
+            .run()?;
+    }
+
+    Ok(())
+}

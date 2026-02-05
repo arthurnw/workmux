@@ -2,7 +2,7 @@ use crate::command::args::PromptArgs;
 use crate::multiplexer::{create_backend, detect_backend};
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
 use crate::workflow::{SetupOptions, WorkflowContext};
-use crate::{config, workflow};
+use crate::{claude, config, direnv, git, workflow};
 use anyhow::{Context, Result, bail};
 
 pub fn run(
@@ -59,6 +59,26 @@ pub fn run(
             Some(&options),
             super::HookPhase::PostCreate,
         );
+    }
+
+    // Get worktree path for trust and direnv operations
+    let worktree_path = git::find_worktree(&resolved_name)
+        .ok()
+        .map(|(path, _)| path);
+
+    // Auto-trust and direnv allow
+    if let Some(ref wt_path) = worktree_path {
+        if context.config.claude.auto_trust {
+            if let Err(e) = claude::trust_directory(wt_path) {
+                tracing::warn!(error = %e, "Failed to trust directory in Claude");
+            }
+        }
+
+        if context.config.direnv.auto_allow {
+            if let Err(e) = direnv::auto_allow(wt_path) {
+                tracing::warn!(error = %e, "Failed to auto-allow direnv");
+            }
+        }
     }
 
     let result = workflow::open(&resolved_name, &context, options, new_window)

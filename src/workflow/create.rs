@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
-use crate::{git, spinner};
+use crate::{claude, git, spinner};
 use tracing::{debug, info, warn};
 
 /// Check if a path is registered as a git worktree.
@@ -287,6 +287,32 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         track_upstream,
     )
     .context("Failed to create git worktree")?;
+
+    // Auto-trust the worktree directory in Claude Code
+    if context.config.claude.auto_trust {
+        if let Err(e) = claude::trust_directory(&worktree_path) {
+            warn!(error = %e, path = %worktree_path.display(), "Failed to trust directory in Claude");
+            // Continue anyway - this is non-fatal
+        }
+    }
+
+    // Spawn background session capture if enabled
+    if context.config.claude.capture_sessions {
+        let repo_name = context
+            .main_worktree_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        if let Err(e) = claude::spawn_session_capture(
+            repo_name,
+            branch_name,
+            context.config.claude.capture_timeout,
+        ) {
+            warn!(error = %e, "Failed to spawn session capture");
+            // Continue anyway - this is non-fatal
+        }
+    }
 
     // Store the comparison base in git config (used for stats and merge target)
     git::set_branch_base(branch_name, &comparison_base).with_context(|| {

@@ -1,3 +1,12 @@
+pub mod session;
+pub mod trust;
+
+pub use session::{
+    capture_latest_session, get_session, list_sessions, remove_session, run_capture_loop,
+    spawn_session_capture, store_session,
+};
+pub use trust::{trust_directory, untrust_directory};
+
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;

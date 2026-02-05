@@ -109,6 +109,42 @@ impl DashboardConfig {
     }
 }
 
+/// Configuration for Claude Code integration
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct ClaudeConfig {
+    /// Auto-trust worktree directories in ~/.claude.json
+    /// Default: true
+    #[serde(default = "default_true")]
+    pub auto_trust: bool,
+
+    /// Capture Claude session IDs for later restoration
+    /// Default: true
+    #[serde(default = "default_true")]
+    pub capture_sessions: bool,
+
+    /// Timeout in seconds for session capture
+    /// Default: 30
+    #[serde(default = "default_capture_timeout")]
+    pub capture_timeout: u32,
+}
+
+/// Configuration for direnv integration
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct DirenvConfig {
+    /// Auto-run 'direnv allow' when opening worktrees with .envrc
+    /// Default: true
+    #[serde(default = "default_true")]
+    pub auto_allow: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_capture_timeout() -> u32 {
+    30
+}
+
 /// Configuration for the workmux tool, read from .workmux.yaml
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct Config {
@@ -177,6 +213,14 @@ pub struct Config {
     /// Dashboard actions configuration
     #[serde(default)]
     pub dashboard: DashboardConfig,
+
+    /// Claude Code integration settings
+    #[serde(default)]
+    pub claude: ClaudeConfig,
+
+    /// direnv integration settings
+    #[serde(default)]
+    pub direnv: DirenvConfig,
 
     /// Whether to use nerdfont icons (None = prompt user on first run)
     #[serde(default)]
@@ -647,6 +691,34 @@ impl Config {
                 .or(self.dashboard.show_check_counts),
         };
 
+        // Claude config: per-field override
+        merged.claude = ClaudeConfig {
+            auto_trust: if project.claude.auto_trust != default_true() {
+                project.claude.auto_trust
+            } else {
+                self.claude.auto_trust
+            },
+            capture_sessions: if project.claude.capture_sessions != default_true() {
+                project.claude.capture_sessions
+            } else {
+                self.claude.capture_sessions
+            },
+            capture_timeout: if project.claude.capture_timeout != default_capture_timeout() {
+                project.claude.capture_timeout
+            } else {
+                self.claude.capture_timeout
+            },
+        };
+
+        // Direnv config: per-field override
+        merged.direnv = DirenvConfig {
+            auto_allow: if project.direnv.auto_allow != default_true() {
+                project.direnv.auto_allow
+            } else {
+                self.direnv.auto_allow
+            },
+        };
+
         merged
     }
 
@@ -859,6 +931,26 @@ impl Config {
 #   commit: "Commit staged changes with a descriptive message"
 #   merge: "!workmux merge"
 #   preview_size: 60
+
+#-------------------------------------------------------------------------------
+# Claude Code Integration
+#-------------------------------------------------------------------------------
+
+# Auto-trust worktree directories in ~/.claude.json
+# Default: true
+# claude:
+#   auto_trust: true
+#   capture_sessions: true
+#   capture_timeout: 30
+
+#-------------------------------------------------------------------------------
+# direnv Integration
+#-------------------------------------------------------------------------------
+
+# Auto-run 'direnv allow' when opening worktrees with .envrc
+# Default: true
+# direnv:
+#   auto_allow: true
 "#;
 
         fs::write(&config_path, example_config)?;
