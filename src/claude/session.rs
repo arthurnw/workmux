@@ -206,26 +206,6 @@ pub fn store_repo_path(repo: &str, repo_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Retrieve the stored path for a repository.
-///
-/// Returns None if no repo_path file exists.
-pub fn get_repo_path(repo: &str) -> Result<Option<PathBuf>> {
-    let path = get_sessions_dir()?.join(repo).join("repo_path");
-
-    match fs::read_to_string(&path) {
-        Ok(content) => {
-            let repo_path = content.trim().to_string();
-            if repo_path.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(PathBuf::from(repo_path)))
-            }
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("Failed to read repo_path file: {}", path.display())),
-    }
-}
-
 /// List all registered repositories with valid paths.
 ///
 /// Scans `sessions/*/repo_path`, validates paths exist on disk.
@@ -663,39 +643,6 @@ mod tests {
     }
 
     #[test]
-    fn test_store_and_get_repo_path() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let temp_dir = TempDir::new().unwrap();
-        // SAFETY: Protected by mutex
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
-        }
-
-        let repo = "test-repo-path";
-        // Use temp_dir itself as a path that exists on disk
-        let repo_path = temp_dir.path().to_path_buf();
-
-        // Initially no repo path
-        let result = get_repo_path(repo).unwrap();
-        assert!(result.is_none());
-
-        // Store repo path
-        store_repo_path(repo, &repo_path).unwrap();
-
-        // Retrieve repo path
-        let result = get_repo_path(repo).unwrap();
-        assert!(result.is_some());
-        // Canonicalized paths should match
-        let expected = repo_path.canonicalize().unwrap();
-        assert_eq!(result.unwrap(), expected);
-
-        // SAFETY: Protected by mutex
-        unsafe {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
-    }
-
-    #[test]
     fn test_list_all_repos() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
@@ -772,13 +719,13 @@ mod tests {
         store_session(repo, "only-branch", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
 
         // repo_path file should exist
-        assert!(get_repo_path(repo).unwrap().is_some());
+        let repo_path_file = get_sessions_dir().unwrap().join(repo).join("repo_path");
+        assert!(repo_path_file.exists());
 
         // Remove the only branch session
         remove_session(repo, "only-branch").unwrap();
 
         // repo_path file should be cleaned up since no branch dirs remain
-        let repo_path_file = get_sessions_dir().unwrap().join(repo).join("repo_path");
         assert!(!repo_path_file.exists());
 
         // SAFETY: Protected by mutex
