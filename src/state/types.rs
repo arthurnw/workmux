@@ -102,7 +102,12 @@ impl AgentState {
     ///
     /// Requires session/window info from multiplexer since we don't store those.
     /// Uses live_title from multiplexer if available, falls back to stored title.
-    pub fn to_agent_pane(&self, session: String, window_name: String, live_title: Option<String>) -> AgentPane {
+    pub fn to_agent_pane(
+        &self,
+        session: String,
+        window_name: String,
+        live_title: Option<String>,
+    ) -> AgentPane {
         AgentPane {
             session,
             window_name,
