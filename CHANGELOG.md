@@ -14,6 +14,16 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.108 (2026-02-05)
+
+- Added support for remote branch refs with `--base` flag, enabling stacked PR
+  workflows where you base a new branch on a remote that isn't fetched locally
+- Enhanced merge functionality with improved LLM-assisted merge conflict
+  resolution
+- Fixed zsh completions preventing file completion and duplicate suggestions
+- Fixed status plugins to better detect when agent needs input
+- Fixed dashboard to show live pane titles instead of stale stored titles
+
 ## v0.1.107 (2026-02-04)
 
 - Shell autocompletion now suggests worktree names for the `close` command
