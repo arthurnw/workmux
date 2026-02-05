@@ -190,7 +190,8 @@ enum Commands {
         #[arg(short = 'A', long = "auto-name", conflicts_with = "pr")]
         auto_name: bool,
 
-        /// Base branch/commit/tag to branch from (defaults to current branch)
+        /// Base branch/commit/tag to start from and compare against (for stats/merge).
+        /// Supports remote refs like origin/develop (auto-fetched). Defaults to current branch.
         #[arg(long)]
         base: Option<String>,
 

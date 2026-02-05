@@ -126,8 +126,8 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         branch_exists, create_new, "create:branch detection"
     );
 
-    // Determine the base for the new branch
-    let base_branch_for_creation = if let Some(remote_spec) = remote_branch {
+    // Determine the creation source (what commit to checkout FROM)
+    let creation_source = if let Some(remote_spec) = remote_branch {
         let spec = git::parse_remote_branch_spec(remote_spec)?;
         if !git::remote_exists(&spec.remote)? {
             return Err(anyhow!(
@@ -150,8 +150,24 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         track_upstream = true;
         Some(remote_ref)
     } else if create_new {
-        if let Some(base) = base_branch {
-            // Use the explicitly provided base branch/commit/tag
+        if let Some(base) = base_branch.as_ref() {
+            // Check if base looks like a remote ref (e.g., origin/develop) and fetch if needed
+            if let Ok(spec) = git::parse_remote_branch_spec(base) {
+                if git::remote_exists(&spec.remote)? {
+                    spinner::with_spinner(&format!("Fetching from '{}'", spec.remote), || {
+                        git::fetch_remote(&spec.remote)
+                    })
+                    .with_context(|| format!("Failed to fetch from remote '{}'", spec.remote))?;
+
+                    let remote_ref = format!("{}/{}", spec.remote, spec.branch);
+                    if !git::branch_exists(&remote_ref)? {
+                        return Err(anyhow!(
+                            "Remote branch '{}' was not found after fetching. Double-check the name.",
+                            remote_ref
+                        ));
+                    }
+                }
+            }
             Some(base.to_string())
         } else {
             // Default to the current branch when no explicit base was provided
@@ -170,6 +186,18 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         }
     } else {
         None
+    };
+
+    // Determine comparison base (what to compare AGAINST for stats/merge)
+    // Priority: explicit --base > default branch > creation source
+    let comparison_base = if let Some(base) = base_branch {
+        base.to_string()
+    } else if remote_branch.is_some() {
+        // Remote branch checkout: default to main branch for comparison
+        git::get_default_branch().unwrap_or_else(|_| "main".to_string())
+    } else {
+        // New branch from local: use same as creation source
+        creation_source.clone().unwrap_or_else(|| "main".to_string())
     };
 
     // Determine worktree path: use config.worktree_dir or default to <project>__worktrees pattern
@@ -246,7 +274,8 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         branch = branch_name,
         path = %worktree_path.display(),
         create_new,
-        base = ?base_branch_for_creation,
+        creation_source = ?creation_source,
+        comparison_base = %comparison_base,
         "create:creating worktree"
     );
 
@@ -254,25 +283,23 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         &worktree_path,
         branch_name,
         create_new,
-        base_branch_for_creation.as_deref(),
+        creation_source.as_deref(),
         track_upstream,
     )
     .context("Failed to create git worktree")?;
 
-    // Store the base branch in git config for future reference (used during removal checks)
-    if let Some(ref base) = base_branch_for_creation {
-        git::set_branch_base(branch_name, base).with_context(|| {
-            format!(
-                "Failed to store base branch '{}' for branch '{}'",
-                base, branch_name
-            )
-        })?;
-        debug!(
-            branch = branch_name,
-            base = base,
-            "create:stored base branch in git config"
-        );
-    }
+    // Store the comparison base in git config (used for stats and merge target)
+    git::set_branch_base(branch_name, &comparison_base).with_context(|| {
+        format!(
+            "Failed to store base branch '{}' for branch '{}'",
+            comparison_base, branch_name
+        )
+    })?;
+    debug!(
+        branch = branch_name,
+        base = %comparison_base,
+        "create:stored comparison base in git config"
+    );
 
     // Setup the rest of the environment (tmux, files, hooks)
     let prompt_file_path = if let Some(p) = prompt {
@@ -322,7 +349,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         agent,
         None,
     )?;
-    result.base_branch = base_branch_for_creation.clone();
+    result.base_branch = Some(comparison_base);
     info!(
         branch = branch_name,
         path = %result.worktree_path.display(),

@@ -301,7 +301,10 @@ pub fn run(
     } else {
         detect_remote_branch(branch_name, base)?
     };
-    let resolved_base = if remote_branch.is_some() { None } else { base };
+    // base is used for comparison (stats/merge target), not creation source
+    // When remote_branch is set, it determines what to checkout FROM
+    // base (or default main) determines what to compare AGAINST
+    let resolved_base = base;
 
     // Determine effective foreach matrix
     let effective_foreach_rows =

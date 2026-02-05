@@ -170,13 +170,9 @@ fn detect_remote_branch_internal(
         .find(|r| branch_name.starts_with(&format!("{}/", r)));
 
     if let Some(remote_name) = detected_remote {
-        if base.is_some() {
-            return Err(anyhow!(
-                "Cannot use --base with a remote branch reference. \
-                The remote branch '{}' will be used as the base.",
-                branch_name
-            ));
-        }
+        // Note: --base IS allowed with remote branches. The remote branch determines
+        // what to checkout FROM, while --base determines what to compare AGAINST.
+        // If --base is not provided, the caller will default to the main branch.
 
         let spec = git::parse_remote_branch_spec(branch_name)
             .context("Invalid remote branch format. Use <remote>/<branch>")?;
@@ -379,13 +375,16 @@ mod tests {
     }
 
     #[test]
-    fn test_base_flag_with_remote_syntax_errors() {
-        // Case: Using --base with remote syntax should error
+    fn test_base_flag_with_remote_syntax_allowed() {
+        // Case: Using --base with remote syntax is allowed
+        // The remote branch determines what to checkout FROM, --base determines what to compare AGAINST
         let ctx = MockContext::new(&["origin"], &["refs/remotes/origin/feature"]);
 
-        let err = detect_remote_branch_internal("origin/feature", Some("main"), &ctx).unwrap_err();
-        assert!(err.to_string().contains("Cannot use --base"));
-        assert!(err.to_string().contains("remote branch"));
+        let result = detect_remote_branch_internal("origin/feature", Some("main"), &ctx);
+        assert!(result.is_ok());
+        let (remote_branch, template_base) = result.unwrap();
+        assert_eq!(remote_branch, Some("origin/feature".to_string()));
+        assert_eq!(template_base, "feature");
     }
 
     #[test]
