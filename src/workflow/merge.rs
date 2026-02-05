@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 
-use crate::{cmd, git};
+use crate::{cmd, git, llm, spinner};
 use tracing::{debug, info};
 
 use super::cleanup;
@@ -15,6 +15,7 @@ pub fn merge(
     ignore_uncommitted: bool,
     rebase: bool,
     squash: bool,
+    auto_message: bool,
     keep: bool,
     no_verify: bool,
     notification: bool,
@@ -26,6 +27,7 @@ pub fn merge(
         ignore_uncommitted,
         rebase,
         squash,
+        auto_message,
         keep,
         no_verify,
         "merge:start"
@@ -275,10 +277,31 @@ pub fn merge(
             return Err(conflict_err(&branch_to_merge));
         }
 
-        // Prompt the user to provide a commit message for the squashed changes.
-        println!("Staged squashed changes. Please provide a commit message in your editor.");
-        git::commit_with_editor(&target_worktree_path)
-            .context("Failed to commit squashed changes. You may need to commit them manually.")?;
+        if auto_message {
+            // Generate commit message using LLM
+            let diff = git::get_staged_diff(&target_worktree_path)
+                .context("Failed to get staged diff for commit message generation")?;
+
+            let model = context
+                .config
+                .auto_name
+                .as_ref()
+                .and_then(|c| c.model.as_deref());
+
+            let commit_message = spinner::with_spinner("Generating commit message", || {
+                llm::generate_commit_message(&diff, model, None)
+            })?;
+
+            println!("  Message: {}", commit_message);
+            git::commit_with_message(&target_worktree_path, &commit_message)
+                .context("Failed to commit squashed changes")?;
+        } else {
+            // Prompt the user to provide a commit message for the squashed changes.
+            println!("Staged squashed changes. Please provide a commit message in your editor.");
+            git::commit_with_editor(&target_worktree_path).context(
+                "Failed to commit squashed changes. You may need to commit them manually.",
+            )?;
+        }
         info!(branch = %branch_to_merge, "merge:squash merge committed");
     } else {
         // Default merge commit workflow

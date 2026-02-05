@@ -30,6 +30,7 @@ If your workflow uses pull requests, the merge happens on the remote after revie
 | `--notification`       | Show a system notification on successful merge. Useful when delegating merge to an AI agent and you want to be notified when it completes.                                                                                                               |
 | `--rebase`             | Rebase the feature branch onto the target before merging (creates a linear history via fast-forward merge). If conflicts occur, you'll need to resolve them manually and run `git rebase --continue`.                                                    |
 | `--squash`             | Squash all commits from the feature branch into a single commit on the target. You'll be prompted to provide a commit message in your editor.                                                                                                            |
+| `--auto-message`       | Generate commit message using LLM (requires `--squash`). Uses the `llm` CLI tool to generate a concise one-line commit message from the staged diff.                                                                                                     |
 
 ## Merge strategies
 
@@ -75,6 +76,9 @@ workmux merge user-auth --rebase
 
 # Squash all commits into a single commit
 workmux merge user-auth --squash
+
+# Squash with auto-generated commit message using LLM
+workmux merge user-auth --squash --auto-message
 
 # Merge but keep the worktree/window/branch to verify before cleanup
 workmux merge user-auth --keep

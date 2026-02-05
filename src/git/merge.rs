@@ -19,6 +19,31 @@ pub fn commit_with_editor(worktree_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Commit staged changes in a worktree with a specific message
+pub fn commit_with_message(worktree_path: &Path, message: &str) -> Result<()> {
+    Cmd::new("git")
+        .workdir(worktree_path)
+        .args(&["commit", "-m", message])
+        .run()
+        .context("Failed to commit")?;
+    Ok(())
+}
+
+/// Get the staged diff in a worktree (for generating commit messages)
+pub fn get_staged_diff(worktree_path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["diff", "--cached", "--stat"])
+        .output()
+        .context("Failed to get staged diff")?;
+
+    if !output.status.success() {
+        return Err(anyhow!("Failed to get staged diff"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 /// Merge a branch into the current branch in a specific worktree
 pub fn merge_in_worktree(worktree_path: &Path, branch_name: &str) -> Result<()> {
     Cmd::new("git")

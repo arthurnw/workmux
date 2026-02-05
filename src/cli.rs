@@ -266,6 +266,10 @@ enum Commands {
         #[arg(long, group = "merge_strategy")]
         squash: bool,
 
+        /// Generate commit message using LLM (only with --squash)
+        #[arg(long, requires = "squash")]
+        auto_message: bool,
+
         /// Keep the worktree, window, and branch after merging (skip cleanup)
         #[arg(short = 'k', long)]
         keep: bool,
@@ -459,6 +463,7 @@ pub fn run() -> Result<()> {
             ignore_uncommitted,
             rebase,
             squash,
+            auto_message,
             keep,
             no_verify,
             notification,
@@ -468,6 +473,7 @@ pub fn run() -> Result<()> {
             ignore_uncommitted,
             rebase,
             squash,
+            auto_message,
             keep,
             no_verify,
             notification,
