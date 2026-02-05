@@ -16,7 +16,7 @@ export const WorkmuxStatusPlugin: Plugin = async ({ $ }) => {
           await $`workmux set-window-status working`.quiet();
           break;
         case 'session.idle':
-          await $`workmux set-window-status done`.quiet();
+          await $`workmux set-window-status waiting`.quiet();
           break;
       }
     },
