@@ -2,8 +2,8 @@ pub mod session;
 pub mod trust;
 
 pub use session::{
-    capture_latest_session, get_session, list_sessions, remove_session, run_capture_loop,
-    spawn_session_capture, store_session,
+    capture_latest_session, get_repo_path, get_session, list_all_repos, list_sessions,
+    remove_session, run_capture_loop, spawn_session_capture, store_repo_path, store_session,
 };
 pub use trust::{trust_directory, untrust_directory};
 

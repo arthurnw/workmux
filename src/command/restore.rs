@@ -5,7 +5,14 @@ use crate::multiplexer::{create_backend, detect_backend};
 use crate::workflow::{SetupOptions, WorkflowContext};
 use crate::{claude, config, git, workflow};
 
-pub fn run(dry_run: bool) -> Result<()> {
+pub fn run(dry_run: bool, all: bool) -> Result<()> {
+    if all {
+        return run_all(dry_run);
+    }
+    run_single_repo(dry_run)
+}
+
+fn run_single_repo(dry_run: bool) -> Result<()> {
     let (config, config_location) = config::Config::load_with_location(None)?;
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config.clone(), mux, config_location)?;
@@ -16,6 +23,29 @@ pub fn run(dry_run: bool) -> Result<()> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow::anyhow!("Could not determine repository name"))?;
 
+    // Register repo path for --all discovery
+    if let Err(e) = claude::store_repo_path(repo_name, &context.main_worktree_root) {
+        tracing::warn!(error = %e, "Failed to store repo path");
+    }
+
+    let (restored, skipped) = restore_repo(&context, repo_name, &config, dry_run)?;
+
+    if dry_run {
+        println!("\nDry run complete. No changes made.");
+    } else {
+        println!("\nRestore complete: {} restored, {} skipped", restored, skipped);
+    }
+
+    Ok(())
+}
+
+/// Restore worktrees for a single repository. Returns (restored, skipped) counts.
+fn restore_repo(
+    context: &WorkflowContext,
+    repo_name: &str,
+    config: &config::Config,
+    dry_run: bool,
+) -> Result<(usize, usize)> {
     let worktrees = git::list_worktrees()?;
     let main_worktree = git::get_main_worktree_root()?;
 
@@ -60,7 +90,7 @@ pub fn run(dry_run: bool) -> Result<()> {
 
         // Open the worktree
         let options = SetupOptions::new(false, false, true);
-        match workflow::open(&branch, &context, options, false) {
+        match workflow::open(&branch, context, options, false) {
             Ok(_result) => {
                 if let Some(ref id) = session_id {
                     println!("  {}: restored with session {}", handle, &id[..8.min(id.len())]);
@@ -75,10 +105,78 @@ pub fn run(dry_run: bool) -> Result<()> {
         }
     }
 
+    Ok((restored, skipped))
+}
+
+fn run_all(dry_run: bool) -> Result<()> {
+    let repos = claude::list_all_repos()?;
+
+    if repos.is_empty() {
+        println!("No registered repositories found.");
+        println!("Repositories are registered when worktrees are created with session capture enabled,");
+        println!("or when 'workmux restore' is run from inside a repository.");
+        return Ok(());
+    }
+
+    let original_dir = std::env::current_dir().ok();
+    let mut total_restored = 0;
+    let mut total_skipped = 0;
+    let mut total_failed = 0;
+
+    for (name, path) in &repos {
+        // Change to repo directory so git/config operations work
+        if let Err(e) = std::env::set_current_dir(path) {
+            println!("\n{}: failed to enter directory ({}) - {}", name, path.display(), e);
+            total_failed += 1;
+            continue;
+        }
+
+        let (config, config_location) = match config::Config::load_with_location(None) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("\n{}: failed to load config - {}", name, e);
+                total_failed += 1;
+                continue;
+            }
+        };
+
+        let mux = create_backend(detect_backend());
+        let context = match WorkflowContext::new(config.clone(), mux, config_location) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("\n{}: failed to initialize - {}", name, e);
+                total_failed += 1;
+                continue;
+            }
+        };
+
+        match restore_repo(&context, name, &config, dry_run) {
+            Ok((restored, skipped)) => {
+                total_restored += restored;
+                total_skipped += skipped;
+            }
+            Err(e) => {
+                println!("\n{}: restore failed - {}", name, e);
+                total_failed += 1;
+            }
+        }
+    }
+
+    // Restore original directory
+    if let Some(dir) = original_dir {
+        let _ = std::env::set_current_dir(dir);
+    }
+
     if dry_run {
-        println!("\nDry run complete. No changes made.");
+        println!("\nDry run complete across {} repositories. No changes made.", repos.len());
     } else {
-        println!("\nRestore complete: {} restored, {} skipped", restored, skipped);
+        println!(
+            "\nRestore complete across {} repositories: {} restored, {} skipped, {} failed",
+            repos.len(),
+            total_restored,
+            total_skipped,
+            total_failed,
+        );
     }
 
     Ok(())

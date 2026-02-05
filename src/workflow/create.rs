@@ -304,6 +304,10 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
+        if let Err(e) = claude::store_repo_path(repo_name, &context.main_worktree_root) {
+            warn!(error = %e, "Failed to store repo path");
+        }
+
         if let Err(e) = claude::spawn_session_capture(
             repo_name,
             branch_name,

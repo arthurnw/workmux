@@ -357,6 +357,10 @@ enum Commands {
         /// Show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
+
+        /// Restore across all registered repositories (not just the current one)
+        #[arg(long)]
+        all: bool,
     },
 
     /// Claude Code integration commands
@@ -424,7 +428,11 @@ enum ClaudeCommands {
 #[derive(Subcommand)]
 enum SessionCommands {
     /// List all tracked Claude sessions for this repository
-    List,
+    List {
+        /// List sessions across all registered repositories
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Manually capture or set a session ID for a branch
     Capture {
@@ -566,12 +574,12 @@ pub fn run() -> Result<()> {
             }
         }
         Commands::Session { command } => match command {
-            SessionCommands::List => command::session::list(),
+            SessionCommands::List { all } => command::session::list(all),
             SessionCommands::Capture { branch, session_id } => {
                 command::session::capture(&branch, session_id.as_deref())
             }
         },
-        Commands::Restore { dry_run } => command::restore::run(dry_run),
+        Commands::Restore { dry_run, all } => command::restore::run(dry_run, all),
         Commands::Claude { command } => match command {
             ClaudeCommands::Prune => prune_claude_config(),
         },

@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -108,6 +108,22 @@ pub fn remove_session(repo: &str, branch: &str) -> Result<()> {
             if let Some(branch_dir) = path.parent() {
                 let _ = fs::remove_dir(branch_dir); // Ignore errors (may not be empty)
                 if let Some(repo_dir) = branch_dir.parent() {
+                    // If no branch subdirectories remain, remove repo_path too
+                    let has_branch_dirs = fs::read_dir(repo_dir)
+                        .ok()
+                        .map(|entries| {
+                            entries
+                                .filter_map(|e| e.ok())
+                                .any(|e| e.path().is_dir())
+                        })
+                        .unwrap_or(false);
+
+                    if !has_branch_dirs {
+                        let repo_path_file = repo_dir.join("repo_path");
+                        let _ = fs::remove_file(&repo_path_file);
+                        debug!(repo, "Removed repo_path file (no branch dirs remain)");
+                    }
+
                     let _ = fs::remove_dir(repo_dir); // Ignore errors
                 }
             }
@@ -161,6 +177,102 @@ pub fn list_sessions(repo: &str) -> Result<Vec<SessionInfo>> {
     sessions.sort_by(|a, b| a.branch.cmp(&b.branch));
 
     Ok(sessions)
+}
+
+/// Store the absolute path to a repository for cross-repo discovery.
+///
+/// Writes to: `~/.local/state/workmux/sessions/<repo>/repo_path`
+/// Uses atomic write (temp + rename) for crash safety.
+pub fn store_repo_path(repo: &str, repo_path: &Path) -> Result<()> {
+    let path = get_sessions_dir()?.join(repo).join("repo_path");
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create session directory: {}", parent.display()))?;
+    }
+
+    let abs_path = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, abs_path.to_string_lossy().as_bytes())
+        .with_context(|| format!("Failed to write temp repo_path file: {}", tmp_path.display()))?;
+
+    fs::rename(&tmp_path, &path)
+        .with_context(|| format!("Failed to rename repo_path file: {}", path.display()))?;
+
+    debug!(repo, path = %abs_path.display(), "Stored repo path");
+    Ok(())
+}
+
+/// Retrieve the stored path for a repository.
+///
+/// Returns None if no repo_path file exists.
+pub fn get_repo_path(repo: &str) -> Result<Option<PathBuf>> {
+    let path = get_sessions_dir()?.join(repo).join("repo_path");
+
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            let repo_path = content.trim().to_string();
+            if repo_path.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(PathBuf::from(repo_path)))
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("Failed to read repo_path file: {}", path.display())),
+    }
+}
+
+/// List all registered repositories with valid paths.
+///
+/// Scans `sessions/*/repo_path`, validates paths exist on disk.
+/// Returns sorted `(name, path)` pairs. Skips repos with missing
+/// repo_path files or non-existent paths.
+pub fn list_all_repos() -> Result<Vec<(String, PathBuf)>> {
+    let sessions_dir = get_sessions_dir()?;
+
+    if !sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut repos = Vec::new();
+
+    for entry in fs::read_dir(&sessions_dir)
+        .with_context(|| format!("Failed to read sessions directory: {}", sessions_dir.display()))?
+    {
+        let entry = entry?;
+        let repo_dir = entry.path();
+
+        if !repo_dir.is_dir() {
+            continue;
+        }
+
+        let repo_name = entry.file_name().to_string_lossy().to_string();
+        let repo_path_file = repo_dir.join("repo_path");
+
+        match fs::read_to_string(&repo_path_file) {
+            Ok(content) => {
+                let path = PathBuf::from(content.trim());
+                if path.exists() {
+                    repos.push((repo_name, path));
+                } else {
+                    warn!(repo = %repo_name, path = %path.display(), "Repo path no longer exists on disk");
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                debug!(repo = %repo_name, "No repo_path file, skipping");
+            }
+            Err(e) => {
+                warn!(repo = %repo_name, error = %e, "Failed to read repo_path file");
+            }
+        }
+    }
+
+    repos.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(repos)
 }
 
 /// Validate that a string is a valid UUID format.
@@ -543,6 +655,131 @@ mod tests {
 
         // Should not error
         remove_session("nonexistent-repo", "nonexistent-branch").unwrap();
+
+        // SAFETY: Protected by mutex
+        unsafe {
+            std::env::remove_var("XDG_STATE_HOME");
+        }
+    }
+
+    #[test]
+    fn test_store_and_get_repo_path() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        // SAFETY: Protected by mutex
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
+        }
+
+        let repo = "test-repo-path";
+        // Use temp_dir itself as a path that exists on disk
+        let repo_path = temp_dir.path().to_path_buf();
+
+        // Initially no repo path
+        let result = get_repo_path(repo).unwrap();
+        assert!(result.is_none());
+
+        // Store repo path
+        store_repo_path(repo, &repo_path).unwrap();
+
+        // Retrieve repo path
+        let result = get_repo_path(repo).unwrap();
+        assert!(result.is_some());
+        // Canonicalized paths should match
+        let expected = repo_path.canonicalize().unwrap();
+        assert_eq!(result.unwrap(), expected);
+
+        // SAFETY: Protected by mutex
+        unsafe {
+            std::env::remove_var("XDG_STATE_HOME");
+        }
+    }
+
+    #[test]
+    fn test_list_all_repos() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        // SAFETY: Protected by mutex
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
+        }
+
+        // Create some repos with valid paths (use temp_dir subdirectories)
+        let repo_a_path = temp_dir.path().join("repo_a_dir");
+        let repo_b_path = temp_dir.path().join("repo_b_dir");
+        fs::create_dir(&repo_a_path).unwrap();
+        fs::create_dir(&repo_b_path).unwrap();
+
+        store_repo_path("repo-a", &repo_a_path).unwrap();
+        store_repo_path("repo-b", &repo_b_path).unwrap();
+
+        // Also store a session to make sure repo_path file doesn't interfere with list_sessions
+        store_session("repo-a", "branch-1", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+
+        let repos = list_all_repos().unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].0, "repo-a");
+        assert_eq!(repos[1].0, "repo-b");
+
+        // Verify list_sessions still works (repo_path file is not a dir, so it's skipped)
+        let sessions = list_sessions("repo-a").unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].branch, "branch-1");
+
+        // SAFETY: Protected by mutex
+        unsafe {
+            std::env::remove_var("XDG_STATE_HOME");
+        }
+    }
+
+    #[test]
+    fn test_list_all_repos_skips_nonexistent_paths() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        // SAFETY: Protected by mutex
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
+        }
+
+        // Write a repo_path pointing to a nonexistent directory
+        let sessions_dir = get_sessions_dir().unwrap();
+        let repo_dir = sessions_dir.join("stale-repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::write(repo_dir.join("repo_path"), "/nonexistent/path/to/repo").unwrap();
+
+        let repos = list_all_repos().unwrap();
+        assert!(repos.is_empty());
+
+        // SAFETY: Protected by mutex
+        unsafe {
+            std::env::remove_var("XDG_STATE_HOME");
+        }
+    }
+
+    #[test]
+    fn test_remove_session_cleans_repo_path() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        // SAFETY: Protected by mutex
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
+        }
+
+        let repo = "cleanup-repo";
+        let repo_path = temp_dir.path().to_path_buf();
+
+        store_repo_path(repo, &repo_path).unwrap();
+        store_session(repo, "only-branch", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+
+        // repo_path file should exist
+        assert!(get_repo_path(repo).unwrap().is_some());
+
+        // Remove the only branch session
+        remove_session(repo, "only-branch").unwrap();
+
+        // repo_path file should be cleaned up since no branch dirs remain
+        let repo_path_file = get_sessions_dir().unwrap().join(repo).join("repo_path");
+        assert!(!repo_path_file.exists());
 
         // SAFETY: Protected by mutex
         unsafe {
