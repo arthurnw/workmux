@@ -43,8 +43,18 @@ unit-tests:
 ruff-check:
     ruff check tests --fix
 
+# Create Python venv and install test dependencies (idempotent)
+setup-venv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f tests/venv/bin/activate ]; then
+        python3 -m venv tests/venv
+    fi
+    source tests/venv/bin/activate
+    pip install -q -r tests/requirements.txt pyright
+
 # Run pyright type checker on Python tests
-pyright:
+pyright: setup-venv
     #!/usr/bin/env bash
     set -euo pipefail
     source tests/venv/bin/activate
@@ -71,8 +81,8 @@ docs-check:
 run *ARGS:
     cargo run -- "$@"
 
-# Run Python tests in parallel (depends on build)
-test *ARGS: build
+# Run Python tests in parallel (depends on build and venv)
+test *ARGS: build setup-venv
     #!/usr/bin/env bash
     set -euo pipefail
     source tests/venv/bin/activate

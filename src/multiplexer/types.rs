@@ -50,6 +50,8 @@ pub struct CreateWindowParams<'a> {
     pub cwd: &'a std::path::Path,
     /// Optional window ID to insert after (for ordering)
     pub after_window: Option<&'a str>,
+    /// Optional target session to create the window in
+    pub target_session: Option<&'a str>,
 }
 
 /// Result of setting up panes in a window
@@ -57,6 +59,8 @@ pub struct CreateWindowParams<'a> {
 pub struct PaneSetupResult {
     /// The ID of the pane that should receive focus
     pub focus_pane_id: String,
+    /// IDs of panes running agent commands
+    pub agent_pane_ids: Vec<String>,
 }
 
 /// Options for pane setup

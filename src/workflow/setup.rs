@@ -3,8 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::multiplexer::{CreateWindowParams, Multiplexer, PaneSetupOptions};
+use crate::state::{AgentState, PaneKey, StateStore};
 use crate::{cmd, config, git, prompt::Prompt};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use fs_extra::dir as fs_dir;
 use fs_extra::file as fs_file;
@@ -23,6 +24,7 @@ use super::types::CreateResult;
 /// * `options` - Setup options (hooks, file ops, etc.)
 /// * `agent` - Optional agent override
 /// * `after_window` - Optional window ID to insert after (for grouping duplicates)
+/// * `target_session` - Optional tmux session to create the window in
 #[allow(clippy::too_many_arguments)]
 pub fn setup_environment(
     mux: &dyn Multiplexer,
@@ -33,6 +35,7 @@ pub fn setup_environment(
     options: &super::types::SetupOptions,
     agent: Option<&str>,
     after_window: Option<String>,
+    target_session: Option<&str>,
 ) -> Result<CreateResult> {
     debug!(
         branch = branch_name,
@@ -114,8 +117,10 @@ pub fn setup_environment(
     // If after_window is provided (for duplicate windows), use that to group with base handle.
     // Otherwise, use prefix-based lookup to group workmux windows together.
     // If not found (or error), falls back to default append behavior.
-    let last_wm_window =
-        after_window.or_else(|| mux.find_last_window_with_prefix(prefix).unwrap_or(None));
+    let last_wm_window = after_window.or_else(|| {
+        mux.find_last_window_with_prefix_in_session(prefix, target_session)
+            .unwrap_or(None)
+    });
 
     // Create window and get the initial pane's ID
     // Use handle for the window name (not branch_name)
@@ -125,6 +130,7 @@ pub fn setup_environment(
             name: handle,
             cwd: effective_working_dir,
             after_window: last_wm_window.as_deref(),
+            target_session,
         })
         .context("Failed to create window")?;
     info!(
@@ -159,8 +165,18 @@ pub fn setup_environment(
     debug!(
         branch = branch_name,
         focus_id = %pane_setup_result.focus_pane_id,
+        agent_panes = pane_setup_result.agent_pane_ids.len(),
         "setup_environment:panes configured"
     );
+
+    // Write initial agent state for dashboard visibility
+    if !pane_setup_result.agent_pane_ids.is_empty() {
+        write_initial_agent_state(
+            mux,
+            &pane_setup_result.agent_pane_ids,
+            effective_working_dir,
+        );
+    }
 
     // Focus the configured pane and optionally switch to the window
     if options.focus_window {
@@ -179,6 +195,58 @@ pub fn setup_environment(
         base_branch: None,
         did_switch: false,
     })
+}
+
+/// Write initial agent state for newly created agent panes so the dashboard
+/// can display them before the agent sends its first status update.
+fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], working_dir: &Path) {
+    let store = match StateStore::new() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "Failed to create state store for initial agent state");
+            return;
+        }
+    };
+
+    let instance_id = mux.instance_id();
+    let backend_name = mux.name().to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    for pane_id in agent_pane_ids {
+        let (pid, command) = match mux.get_live_pane_info(pane_id) {
+            Ok(Some(info)) => (info.pid, info.current_command),
+            Ok(None) => {
+                warn!(pane_id, "Pane not found for initial agent state");
+                continue;
+            }
+            Err(e) => {
+                warn!(pane_id, error = %e, "Failed to query pane for initial agent state");
+                continue;
+            }
+        };
+
+        let state = AgentState {
+            pane_key: PaneKey {
+                backend: backend_name.clone(),
+                instance: instance_id.clone(),
+                pane_id: pane_id.clone(),
+            },
+            workdir: working_dir.to_path_buf(),
+            status: None,
+            status_ts: None,
+            pane_title: None,
+            pane_pid: pid,
+            command,
+            updated_ts: now,
+        };
+
+        if let Err(e) = store.upsert_agent(&state) {
+            warn!(pane_id, error = %e, "Failed to write initial agent state");
+        }
+    }
 }
 
 pub fn resolve_pane_configuration(

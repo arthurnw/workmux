@@ -168,10 +168,12 @@ pub trait Multiplexer: Send + Sync {
         if panes.is_empty() {
             return Ok(PaneSetupResult {
                 focus_pane_id: initial_pane_id.to_string(),
+                agent_pane_ids: Vec::new(),
             });
         }
 
         let mut focus_pane_id: Option<String> = None;
+        let mut agent_pane_ids: Vec<String> = Vec::new();
         let mut pane_ids: Vec<String> = vec![initial_pane_id.to_string()];
         let effective_agent = task_agent.or(config.agent.as_deref());
         let shell = self.get_default_shell()?;
@@ -220,6 +222,14 @@ pub trait Multiplexer: Send + Sync {
                 handshake.wait()?;
                 self.send_keys(&spawned_id, &resolved.command)?;
 
+                // Track agent panes
+                if let Some(agent_cmd) = effective_agent {
+                    let original_cmd = pane_config.command.as_deref().unwrap_or("");
+                    if crate::config::is_agent_command(original_cmd, agent_cmd) {
+                        agent_pane_ids.push(spawned_id.clone());
+                    }
+                }
+
                 // Set working status for agent panes with injected prompts
                 if resolved.prompt_injected
                     && agent::resolve_profile(effective_agent).needs_auto_status()
@@ -265,6 +275,7 @@ pub trait Multiplexer: Send + Sync {
 
         Ok(PaneSetupResult {
             focus_pane_id: focus_pane_id.unwrap_or_else(|| pane_ids[0].clone()),
+            agent_pane_ids,
         })
     }
 
@@ -286,6 +297,31 @@ pub trait Multiplexer: Send + Sync {
     #[allow(dead_code)] // Reserved for future multi-session features
     fn get_all_window_names_all_sessions(&self) -> Result<HashSet<String>> {
         self.get_all_window_names()
+    }
+
+    /// Check if a window exists in a specific session.
+    ///
+    /// When `session` is None, delegates to `window_exists` (current session).
+    fn window_exists_in_session(
+        &self,
+        prefix: &str,
+        name: &str,
+        session: Option<&str>,
+    ) -> Result<bool> {
+        let _ = session; // default ignores session
+        self.window_exists(prefix, name)
+    }
+
+    /// Find the last window with a given prefix in a specific session.
+    ///
+    /// When `session` is None, delegates to `find_last_window_with_prefix`.
+    fn find_last_window_with_prefix_in_session(
+        &self,
+        prefix: &str,
+        session: Option<&str>,
+    ) -> Result<Option<String>> {
+        let _ = session; // default ignores session
+        self.find_last_window_with_prefix(prefix)
     }
 
     // === State Reconciliation ===

@@ -271,8 +271,10 @@ pub fn jump() -> Result<()> {
             .args(&[
                 "new-session",
                 "-d",
-                "-s", session_name,
-                "-n", window_name,
+                "-s",
+                session_name,
+                "-n",
+                window_name,
                 "workmux dashboard",
             ])
             .run()?;
@@ -289,8 +291,10 @@ pub fn jump() -> Result<()> {
             crate::cmd::Cmd::new("tmux")
                 .args(&[
                     "new-window",
-                    "-t", session_name,
-                    "-n", window_name,
+                    "-t",
+                    session_name,
+                    "-n",
+                    window_name,
                     "workmux dashboard",
                 ])
                 .run()?;
@@ -300,11 +304,19 @@ pub fn jump() -> Result<()> {
     // Switch to the dashboard
     if inside_tmux {
         crate::cmd::Cmd::new("tmux")
-            .args(&["switch-client", "-t", &format!("{}:{}", session_name, window_name)])
+            .args(&[
+                "switch-client",
+                "-t",
+                &format!("{}:{}", session_name, window_name),
+            ])
             .run()?;
     } else {
         crate::cmd::Cmd::new("tmux")
-            .args(&["attach-session", "-t", &format!("{}:{}", session_name, window_name)])
+            .args(&[
+                "attach-session",
+                "-t",
+                &format!("{}:{}", session_name, window_name),
+            ])
             .run()?;
     }
 

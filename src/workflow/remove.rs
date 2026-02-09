@@ -81,10 +81,10 @@ pub fn remove(
     // The CLI provides a user-friendly confirmation prompt before calling this function
 
     // Untrust the directory from Claude Code
-    if context.config.claude.auto_trust {
-        if let Err(e) = claude::untrust_directory(&worktree_path) {
-            warn!(error = %e, path = %worktree_path.display(), "Failed to untrust directory from Claude");
-        }
+    if context.config.claude.auto_trust
+        && let Err(e) = claude::untrust_directory(&worktree_path)
+    {
+        warn!(error = %e, path = %worktree_path.display(), "Failed to untrust directory from Claude");
     }
 
     // Remove session data

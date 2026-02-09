@@ -1,9 +1,9 @@
 //! Restore command - opens all worktrees with optional Claude session resumption
 
-use anyhow::Result;
 use crate::multiplexer::{create_backend, detect_backend};
 use crate::workflow::{SetupOptions, WorkflowContext};
 use crate::{claude, config, git, workflow};
+use anyhow::Result;
 
 pub fn run(dry_run: bool, all: bool) -> Result<()> {
     if all {
@@ -28,12 +28,22 @@ fn run_single_repo(dry_run: bool) -> Result<()> {
         tracing::warn!(error = %e, "Failed to store repo path");
     }
 
-    let (restored, skipped) = restore_repo(&context, repo_name, &config, dry_run)?;
+    // Register tmux session if running inside one
+    if let Some(session) = context.mux.current_session()
+        && let Err(e) = claude::store_tmux_session(repo_name, &session)
+    {
+        tracing::warn!(error = %e, "Failed to store tmux session");
+    }
+
+    let (restored, skipped) = restore_repo(&context, repo_name, &config, dry_run, None)?;
 
     if dry_run {
         println!("\nDry run complete. No changes made.");
     } else {
-        println!("\nRestore complete: {} restored, {} skipped", restored, skipped);
+        println!(
+            "\nRestore complete: {} restored, {} skipped",
+            restored, skipped
+        );
     }
 
     Ok(())
@@ -45,6 +55,7 @@ fn restore_repo(
     repo_name: &str,
     config: &config::Config,
     dry_run: bool,
+    target_session: Option<&str>,
 ) -> Result<(usize, usize)> {
     let worktrees = git::list_worktrees()?;
     let main_worktree = git::get_main_worktree_root()?;
@@ -65,8 +76,11 @@ fn restore_repo(
             .and_then(|n| n.to_str())
             .unwrap_or(&branch);
 
-        // Check if window already exists
-        if context.mux.window_exists(&context.prefix, handle)? {
+        // Check if window already exists (in target session if specified)
+        if context
+            .mux
+            .window_exists_in_session(&context.prefix, handle, target_session)?
+        {
             println!("  {}: window already exists, skipping", handle);
             skipped += 1;
             continue;
@@ -90,10 +104,14 @@ fn restore_repo(
 
         // Open the worktree
         let options = SetupOptions::new(false, false, true);
-        match workflow::open(&branch, context, options, false) {
+        match workflow::open(&branch, context, options, false, target_session) {
             Ok(_result) => {
                 if let Some(ref id) = session_id {
-                    println!("  {}: restored with session {}", handle, &id[..8.min(id.len())]);
+                    println!(
+                        "  {}: restored with session {}",
+                        handle,
+                        &id[..8.min(id.len())]
+                    );
                 } else {
                     println!("  {}: opened (no saved session)", handle);
                 }
@@ -113,7 +131,9 @@ fn run_all(dry_run: bool) -> Result<()> {
 
     if repos.is_empty() {
         println!("No registered repositories found.");
-        println!("Repositories are registered when worktrees are created with session capture enabled,");
+        println!(
+            "Repositories are registered when worktrees are created with session capture enabled,"
+        );
         println!("or when 'workmux restore' is run from inside a repository.");
         return Ok(());
     }
@@ -126,7 +146,12 @@ fn run_all(dry_run: bool) -> Result<()> {
     for (name, path) in &repos {
         // Change to repo directory so git/config operations work
         if let Err(e) = std::env::set_current_dir(path) {
-            println!("\n{}: failed to enter directory ({}) - {}", name, path.display(), e);
+            println!(
+                "\n{}: failed to enter directory ({}) - {}",
+                name,
+                path.display(),
+                e
+            );
             total_failed += 1;
             continue;
         }
@@ -150,7 +175,12 @@ fn run_all(dry_run: bool) -> Result<()> {
             }
         };
 
-        match restore_repo(&context, name, &config, dry_run) {
+        // Look up stored tmux session, fall back to repo name
+        let target_session = claude::get_tmux_session(name)
+            .unwrap_or(None)
+            .unwrap_or_else(|| name.to_string());
+
+        match restore_repo(&context, name, &config, dry_run, Some(&target_session)) {
             Ok((restored, skipped)) => {
                 total_restored += restored;
                 total_skipped += skipped;
@@ -168,7 +198,10 @@ fn run_all(dry_run: bool) -> Result<()> {
     }
 
     if dry_run {
-        println!("\nDry run complete across {} repositories. No changes made.", repos.len());
+        println!(
+            "\nDry run complete across {} repositories. No changes made.",
+            repos.len()
+        );
     } else {
         println!(
             "\nRestore complete across {} repositories: {} restored, {} skipped, {} failed",

@@ -89,7 +89,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
             open_if_exists: false,
         };
 
-        return super::open::open(branch_name, context, open_options, false);
+        return super::open::open(branch_name, context, open_options, false, None);
     }
 
     // Check window using handle (the display name)
@@ -152,20 +152,20 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     } else if create_new {
         if let Some(base) = base_branch.as_ref() {
             // Check if base looks like a remote ref (e.g., origin/develop) and fetch if needed
-            if let Ok(spec) = git::parse_remote_branch_spec(base) {
-                if git::remote_exists(&spec.remote)? {
-                    spinner::with_spinner(&format!("Fetching from '{}'", spec.remote), || {
-                        git::fetch_remote(&spec.remote)
-                    })
-                    .with_context(|| format!("Failed to fetch from remote '{}'", spec.remote))?;
+            if let Ok(spec) = git::parse_remote_branch_spec(base)
+                && git::remote_exists(&spec.remote)?
+            {
+                spinner::with_spinner(&format!("Fetching from '{}'", spec.remote), || {
+                    git::fetch_remote(&spec.remote)
+                })
+                .with_context(|| format!("Failed to fetch from remote '{}'", spec.remote))?;
 
-                    let remote_ref = format!("{}/{}", spec.remote, spec.branch);
-                    if !git::branch_exists(&remote_ref)? {
-                        return Err(anyhow!(
-                            "Remote branch '{}' was not found after fetching. Double-check the name.",
-                            remote_ref
-                        ));
-                    }
+                let remote_ref = format!("{}/{}", spec.remote, spec.branch);
+                if !git::branch_exists(&remote_ref)? {
+                    return Err(anyhow!(
+                        "Remote branch '{}' was not found after fetching. Double-check the name.",
+                        remote_ref
+                    ));
                 }
             }
             Some(base.to_string())
@@ -197,7 +197,9 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         git::get_default_branch().unwrap_or_else(|_| "main".to_string())
     } else {
         // New branch from local: use same as creation source
-        creation_source.clone().unwrap_or_else(|| "main".to_string())
+        creation_source
+            .clone()
+            .unwrap_or_else(|| "main".to_string())
     };
 
     // Determine worktree path: use config.worktree_dir or default to <project>__worktrees pattern
@@ -289,11 +291,11 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     .context("Failed to create git worktree")?;
 
     // Auto-trust the worktree directory in Claude Code
-    if context.config.claude.auto_trust {
-        if let Err(e) = claude::trust_directory(&worktree_path) {
-            warn!(error = %e, path = %worktree_path.display(), "Failed to trust directory in Claude");
-            // Continue anyway - this is non-fatal
-        }
+    if context.config.claude.auto_trust
+        && let Err(e) = claude::trust_directory(&worktree_path)
+    {
+        warn!(error = %e, path = %worktree_path.display(), "Failed to trust directory in Claude");
+        // Continue anyway - this is non-fatal
     }
 
     // Spawn background session capture if enabled
@@ -378,8 +380,26 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         &options_with_prompt,
         agent,
         None,
+        None,
     )?;
     result.base_branch = Some(comparison_base);
+
+    // Register repo path + tmux session for restore --all
+    let repo_name = context
+        .main_worktree_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    if let Err(e) = claude::store_repo_path(repo_name, &context.main_worktree_root) {
+        warn!(error = %e, "Failed to store repo path");
+    }
+    if let Some(session) = context.mux.current_session()
+        && let Err(e) = claude::store_tmux_session(repo_name, &session)
+    {
+        warn!(error = %e, "Failed to store tmux session");
+    }
+
     info!(
         branch = branch_name,
         path = %result.worktree_path.display(),

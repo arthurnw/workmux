@@ -14,6 +14,7 @@ pub fn open(
     context: &WorkflowContext,
     options: SetupOptions,
     new_window: bool,
+    target_session: Option<&str>,
 ) -> Result<CreateResult> {
     info!(
         name = name,
@@ -48,7 +49,10 @@ pub fn open(
         .to_string();
 
     // Determine final handle (with or without suffix)
-    let window_exists = context.mux.window_exists(&context.prefix, &base_handle)?;
+    let window_exists =
+        context
+            .mux
+            .window_exists_in_session(&context.prefix, &base_handle, target_session)?;
 
     // If window exists and we're not forcing new, switch to it
     if window_exists && !new_window {
@@ -116,7 +120,25 @@ pub fn open(
         &options_with_workdir,
         None,
         after_window,
+        target_session,
     )?;
+
+    // Register repo path + tmux session for restore --all
+    let repo_name = context
+        .main_worktree_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    if let Err(e) = crate::claude::store_repo_path(repo_name, &context.main_worktree_root) {
+        tracing::warn!(error = %e, "Failed to store repo path");
+    }
+    if let Some(session) = context.mux.current_session()
+        && let Err(e) = crate::claude::store_tmux_session(repo_name, &session)
+    {
+        tracing::warn!(error = %e, "Failed to store tmux session");
+    }
+
     info!(
         handle = handle,
         branch = branch_name,

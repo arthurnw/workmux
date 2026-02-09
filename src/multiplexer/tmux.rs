@@ -102,6 +102,26 @@ impl TmuxBackend {
         Ok(())
     }
 
+    /// Ensure a tmux session exists, creating it if necessary.
+    fn ensure_session_exists(&self, session_name: &str, cwd: &Path) -> Result<()> {
+        let has_session = Cmd::new("tmux")
+            .args(&["has-session", "-t", session_name])
+            .run_as_check()
+            .unwrap_or(false);
+
+        if !has_session {
+            let cwd_str = cwd
+                .to_str()
+                .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
+            Cmd::new("tmux")
+                .args(&["new-session", "-d", "-s", session_name, "-c", cwd_str])
+                .run()
+                .with_context(|| format!("Failed to create tmux session '{}'", session_name))?;
+        }
+
+        Ok(())
+    }
+
     /// Internal split pane implementation.
     fn split_pane_internal(
         &self,
@@ -206,11 +226,22 @@ impl Multiplexer for TmuxBackend {
             .to_str()
             .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
 
+        // Ensure target session exists if specified
+        if let Some(session) = params.target_session {
+            self.ensure_session_exists(session, params.cwd)?;
+        }
+
         let mut cmd = Cmd::new("tmux").args(&["new-window", "-d"]);
+
+        // Pre-compute session target string so it outlives the cmd builder
+        let session_target = params.target_session.map(|s| format!("{}:", s));
 
         // Insert after the target window if specified (keeps workmux windows grouped)
         if let Some(target) = params.after_window {
             cmd = cmd.arg("-a").args(&["-t", target]);
+        } else if let Some(ref target) = session_target {
+            // Target the session so the window is created there
+            cmd = cmd.args(&["-t", target.as_str()]);
         }
 
         // Use -P to print pane info, -F to format output to just the pane ID
@@ -278,6 +309,53 @@ impl Multiplexer for TmuxBackend {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    fn window_exists_in_session(
+        &self,
+        prefix: &str,
+        name: &str,
+        session: Option<&str>,
+    ) -> Result<bool> {
+        let Some(session) = session else {
+            return self.window_exists(prefix, name);
+        };
+        let prefixed_name = util::prefixed(prefix, name);
+        match self.tmux_query(&["list-windows", "-t", session, "-F", "#{window_name}"]) {
+            Ok(output) => Ok(output.lines().any(|line| line == prefixed_name)),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn find_last_window_with_prefix_in_session(
+        &self,
+        prefix: &str,
+        session: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(session) = session else {
+            return self.find_last_window_with_prefix(prefix);
+        };
+        let output = self
+            .tmux_query(&[
+                "list-windows",
+                "-t",
+                session,
+                "-F",
+                "#{window_id} #{window_name}",
+            ])
+            .unwrap_or_default();
+
+        let mut last_match: Option<String> = None;
+
+        for line in output.lines() {
+            if let Some((id, name)) = line.split_once(' ')
+                && name.starts_with(prefix)
+            {
+                last_match = Some(id.to_string());
+            }
+        }
+
+        Ok(last_match)
     }
 
     fn get_all_window_names(&self) -> Result<HashSet<String>> {

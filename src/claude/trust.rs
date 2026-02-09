@@ -1,7 +1,7 @@
 //! Claude Code trust management for ~/.claude.json
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
@@ -144,21 +144,27 @@ mod tests {
     #[test]
     fn test_create_trust_entry_structure() {
         let entry = create_trust_entry();
-        assert!(entry
-            .get("hasTrustDialogAccepted")
-            .unwrap()
-            .as_bool()
-            .unwrap());
-        assert!(entry
-            .get("hasCompletedProjectOnboarding")
-            .unwrap()
-            .as_bool()
-            .unwrap());
-        assert!(entry
-            .get("allowedTools")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            entry
+                .get("hasTrustDialogAccepted")
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
+        assert!(
+            entry
+                .get("hasCompletedProjectOnboarding")
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
+        assert!(
+            entry
+                .get("allowedTools")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 }

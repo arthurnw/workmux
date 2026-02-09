@@ -1,7 +1,7 @@
 //! Session management commands for Claude session tracking
 
-use anyhow::{Context, Result};
 use crate::{claude, git};
+use anyhow::{Context, Result};
 
 /// List tracked sessions for the current repository, or all registered repos.
 pub fn list(all: bool) -> Result<()> {
@@ -9,8 +9,7 @@ pub fn list(all: bool) -> Result<()> {
         return list_all();
     }
 
-    let repo_root = git::get_main_worktree_root()
-        .context("Not in a git repository")?;
+    let repo_root = git::get_main_worktree_root().context("Not in a git repository")?;
 
     let repo_name = repo_root
         .file_name()
@@ -51,7 +50,9 @@ fn list_all() -> Result<()> {
 
     if repos.is_empty() {
         println!("No registered repositories found.");
-        println!("Repositories are registered when worktrees are created with session capture enabled.");
+        println!(
+            "Repositories are registered when worktrees are created with session capture enabled."
+        );
         return Ok(());
     }
 
@@ -74,7 +75,10 @@ fn list_all() -> Result<()> {
     }
 
     if !any_sessions {
-        println!("No sessions tracked across {} registered repositories.", repos.len());
+        println!(
+            "No sessions tracked across {} registered repositories.",
+            repos.len()
+        );
     }
 
     Ok(())
@@ -82,8 +86,7 @@ fn list_all() -> Result<()> {
 
 /// Manually capture or set a session ID for a branch
 pub fn capture(branch: &str, session_id: Option<&str>) -> Result<()> {
-    let repo_root = git::get_main_worktree_root()
-        .context("Not in a git repository")?;
+    let repo_root = git::get_main_worktree_root().context("Not in a git repository")?;
 
     let repo_name = repo_root
         .file_name()

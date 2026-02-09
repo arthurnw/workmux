@@ -47,7 +47,10 @@ pub fn get_sessions_dir() -> Result<PathBuf> {
 ///
 /// Returns: `~/.local/state/workmux/sessions/<repo>/<branch>/session_id`
 pub fn get_session_path(repo: &str, branch: &str) -> Result<PathBuf> {
-    Ok(get_sessions_dir()?.join(repo).join(branch).join("session_id"))
+    Ok(get_sessions_dir()?
+        .join(repo)
+        .join(branch)
+        .join("session_id"))
 }
 
 /// Store a session ID for a repo/branch combination.
@@ -90,7 +93,9 @@ pub fn get_session(repo: &str, branch: &str) -> Result<Option<String>> {
             }
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("Failed to read session file: {}", path.display())),
+        Err(e) => {
+            Err(e).with_context(|| format!("Failed to read session file: {}", path.display()))
+        }
     }
 }
 
@@ -111,11 +116,7 @@ pub fn remove_session(repo: &str, branch: &str) -> Result<()> {
                     // If no branch subdirectories remain, remove repo_path too
                     let has_branch_dirs = fs::read_dir(repo_dir)
                         .ok()
-                        .map(|entries| {
-                            entries
-                                .filter_map(|e| e.ok())
-                                .any(|e| e.path().is_dir())
-                        })
+                        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| e.path().is_dir()))
                         .unwrap_or(false);
 
                     if !has_branch_dirs {
@@ -156,10 +157,7 @@ pub fn list_sessions(repo: &str) -> Result<Vec<SessionInfo>> {
             continue;
         }
 
-        let branch = entry
-            .file_name()
-            .to_string_lossy()
-            .to_string();
+        let branch = entry.file_name().to_string_lossy().to_string();
 
         let session_id_path = branch_path.join("session_id");
         let session_id = match fs::read_to_string(&session_id_path) {
@@ -196,14 +194,67 @@ pub fn store_repo_path(repo: &str, repo_path: &Path) -> Result<()> {
         .unwrap_or_else(|_| repo_path.to_path_buf());
 
     let tmp_path = path.with_extension("tmp");
-    fs::write(&tmp_path, abs_path.to_string_lossy().as_bytes())
-        .with_context(|| format!("Failed to write temp repo_path file: {}", tmp_path.display()))?;
+    fs::write(&tmp_path, abs_path.to_string_lossy().as_bytes()).with_context(|| {
+        format!(
+            "Failed to write temp repo_path file: {}",
+            tmp_path.display()
+        )
+    })?;
 
     fs::rename(&tmp_path, &path)
         .with_context(|| format!("Failed to rename repo_path file: {}", path.display()))?;
 
     debug!(repo, path = %abs_path.display(), "Stored repo path");
     Ok(())
+}
+
+/// Store the tmux session name for a repository.
+///
+/// Writes to: `~/.local/state/workmux/sessions/<repo>/tmux_session`
+/// Uses atomic write (temp + rename) for crash safety.
+pub fn store_tmux_session(repo: &str, session_name: &str) -> Result<()> {
+    let path = get_sessions_dir()?.join(repo).join("tmux_session");
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create session directory: {}", parent.display()))?;
+    }
+
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, session_name).with_context(|| {
+        format!(
+            "Failed to write temp tmux_session file: {}",
+            tmp_path.display()
+        )
+    })?;
+
+    fs::rename(&tmp_path, &path)
+        .with_context(|| format!("Failed to rename tmux_session file: {}", path.display()))?;
+
+    debug!(repo, session_name, "Stored tmux session name");
+    Ok(())
+}
+
+/// Retrieve the stored tmux session name for a repository.
+///
+/// Returns None if no session name is stored.
+pub fn get_tmux_session(repo: &str) -> Result<Option<String>> {
+    let path = get_sessions_dir()?.join(repo).join("tmux_session");
+
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            let session_name = content.trim().to_string();
+            if session_name.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(session_name))
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            Err(e).with_context(|| format!("Failed to read tmux_session file: {}", path.display()))
+        }
+    }
 }
 
 /// List all registered repositories with valid paths.
@@ -220,9 +271,12 @@ pub fn list_all_repos() -> Result<Vec<(String, PathBuf)>> {
 
     let mut repos = Vec::new();
 
-    for entry in fs::read_dir(&sessions_dir)
-        .with_context(|| format!("Failed to read sessions directory: {}", sessions_dir.display()))?
-    {
+    for entry in fs::read_dir(&sessions_dir).with_context(|| {
+        format!(
+            "Failed to read sessions directory: {}",
+            sessions_dir.display()
+        )
+    })? {
         let entry = entry?;
         let repo_dir = entry.path();
 
@@ -296,7 +350,12 @@ pub fn count_session_dirs() -> Result<usize> {
     }
 
     let count = fs::read_dir(&session_env_dir)
-        .with_context(|| format!("Failed to read session-env directory: {}", session_env_dir.display()))?
+        .with_context(|| {
+            format!(
+                "Failed to read session-env directory: {}",
+                session_env_dir.display()
+            )
+        })?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .count();
@@ -321,10 +380,7 @@ pub fn spawn_session_capture(repo: &str, branch: &str, timeout_secs: u32) -> Res
 
     debug!(
         repo,
-        branch,
-        initial_count,
-        timeout_secs,
-        "Spawning session capture subprocess"
+        branch, initial_count, timeout_secs, "Spawning session capture subprocess"
     );
 
     let mut cmd = Command::new(&exe);
@@ -365,10 +421,7 @@ pub fn spawn_session_capture(repo: &str, branch: &str, timeout_secs: u32) -> Res
 
     debug!(
         repo,
-        branch,
-        initial_count,
-        timeout_secs,
-        "Spawning session capture subprocess"
+        branch, initial_count, timeout_secs, "Spawning session capture subprocess"
     );
 
     Command::new(&exe)
@@ -437,7 +490,10 @@ pub fn run_capture_loop(
                     info!(repo, branch, session_id, "Session ID captured successfully");
                     return Ok(());
                 } else {
-                    warn!(session_id, "Found directory is not a valid UUID, continuing to poll");
+                    warn!(
+                        session_id,
+                        "Found directory is not a valid UUID, continuing to poll"
+                    );
                 }
             }
         }
@@ -468,17 +524,17 @@ fn find_latest_session_id(session_env_dir: &PathBuf) -> Result<Option<String>> {
         let name = entry.file_name().to_string_lossy().to_string();
 
         // Get modification time
-        if let Ok(metadata) = path.metadata() {
-            if let Ok(modified) = metadata.modified() {
-                match &latest {
-                    Some((latest_time, _)) if modified > *latest_time => {
-                        latest = Some((modified, name));
-                    }
-                    None => {
-                        latest = Some((modified, name));
-                    }
-                    _ => {}
+        if let Ok(metadata) = path.metadata()
+            && let Ok(modified) = metadata.modified()
+        {
+            match &latest {
+                Some((latest_time, _)) if modified > *latest_time => {
+                    latest = Some((modified, name));
                 }
+                None => {
+                    latest = Some((modified, name));
+                }
+                _ => {}
             }
         }
     }

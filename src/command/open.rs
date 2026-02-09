@@ -68,20 +68,20 @@ pub fn run(
 
     // Auto-trust and direnv allow
     if let Some(ref wt_path) = worktree_path {
-        if context.config.claude.auto_trust {
-            if let Err(e) = claude::trust_directory(wt_path) {
-                tracing::warn!(error = %e, "Failed to trust directory in Claude");
-            }
+        if context.config.claude.auto_trust
+            && let Err(e) = claude::trust_directory(wt_path)
+        {
+            tracing::warn!(error = %e, "Failed to trust directory in Claude");
         }
 
-        if context.config.direnv.auto_allow {
-            if let Err(e) = direnv::auto_allow(wt_path) {
-                tracing::warn!(error = %e, "Failed to auto-allow direnv");
-            }
+        if context.config.direnv.auto_allow
+            && let Err(e) = direnv::auto_allow(wt_path)
+        {
+            tracing::warn!(error = %e, "Failed to auto-allow direnv");
         }
     }
 
-    let result = workflow::open(&resolved_name, &context, options, new_window)
+    let result = workflow::open(&resolved_name, &context, options, new_window, None)
         .context("Failed to open worktree environment")?;
 
     if result.did_switch {
