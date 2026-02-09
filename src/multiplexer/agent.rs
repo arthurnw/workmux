@@ -35,6 +35,13 @@ pub trait AgentProfile: Send + Sync {
     fn prompt_argument(&self, prompt_path: &str) -> String {
         format!("-- \"$(cat {})\"", prompt_path)
     }
+
+    /// Return the CLI argument for naming/resuming a session, if supported.
+    ///
+    /// Only agents that support named sessions return a value here.
+    fn session_name_argument(&self, _session_name: &str) -> Option<String> {
+        None
+    }
 }
 
 // === Built-in Profiles ===
@@ -52,6 +59,10 @@ impl AgentProfile for ClaudeProfile {
 
     fn needs_auto_status(&self) -> bool {
         true
+    }
+
+    fn session_name_argument(&self, session_name: &str) -> Option<String> {
+        Some(format!("--resume {}", session_name))
     }
 }
 
@@ -162,6 +173,10 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-- \"$(cat PROMPT.md)\""
         );
+        assert_eq!(
+            profile.session_name_argument("feature-auth"),
+            Some("--resume feature-auth".to_string())
+        );
     }
 
     #[test]
@@ -174,6 +189,7 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-i \"$(cat PROMPT.md)\""
         );
+        assert_eq!(profile.session_name_argument("feature-auth"), None);
     }
 
     #[test]
@@ -186,6 +202,7 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "--prompt \"$(cat PROMPT.md)\""
         );
+        assert_eq!(profile.session_name_argument("feature-auth"), None);
     }
 
     #[test]
@@ -198,6 +215,7 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-- \"$(cat PROMPT.md)\""
         );
+        assert_eq!(profile.session_name_argument("feature-auth"), None);
     }
 
     #[test]
@@ -210,6 +228,7 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-- \"$(cat PROMPT.md)\""
         );
+        assert_eq!(profile.session_name_argument("feature-auth"), None);
     }
 
     // === resolve_profile tests ===

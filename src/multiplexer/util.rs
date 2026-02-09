@@ -49,6 +49,7 @@ pub fn rewrite_agent_command(
     working_dir: &Path,
     effective_agent: Option<&str>,
     shell: &str,
+    session_name: Option<&str>,
 ) -> Option<String> {
     let agent_command = effective_agent?;
     let trimmed_command = command.trim();
@@ -76,7 +77,7 @@ pub fn rewrite_agent_command(
     let rest = pane_rest.trim_start();
 
     // Build the inner command step-by-step to ensure correct order:
-    // [agent_command] [agent_options] [user_args] [prompt_argument]
+    // [agent_command] [user_args] [session_name_arg] [prompt_argument]
     let mut inner_cmd = pane_token.to_string();
 
     // Add user-provided arguments from config (must come before the prompt)
@@ -85,8 +86,16 @@ pub fn rewrite_agent_command(
         inner_cmd.push_str(rest);
     }
 
-    // Add the prompt argument using agent profile
+    // Add session name argument (e.g., --resume handle) before the prompt
     let profile = super::agent::resolve_profile(effective_agent);
+    if let Some(name) = session_name
+        && let Some(session_arg) = profile.session_name_argument(name)
+    {
+        inner_cmd.push(' ');
+        inner_cmd.push_str(&session_arg);
+    }
+
+    // Add the prompt argument using agent profile
     inner_cmd.push(' ');
     inner_cmd.push_str(&profile.prompt_argument(&prompt_path));
 
@@ -120,6 +129,7 @@ pub fn resolve_pane_command(
     working_dir: &Path,
     effective_agent: Option<&str>,
     shell: &str,
+    session_name: Option<&str>,
 ) -> Option<ResolvedCommand> {
     let command = if pane_command == Some("<agent>") {
         effective_agent?
@@ -137,8 +147,27 @@ pub fn resolve_pane_command(
         working_dir,
         effective_agent,
         shell,
+        session_name,
     );
     let prompt_injected = matches!(result, Cow::Owned(_));
+
+    // If the command wasn't rewritten (no prompt), check if we still need to
+    // inject a session name argument for agent commands without prompts.
+    if !prompt_injected {
+        if let Some(name) = session_name {
+            let profile = super::agent::resolve_profile(effective_agent);
+            if let Some(session_arg) = profile.session_name_argument(name) {
+                // Verify this command matches the configured agent
+                if is_agent_command(command, effective_agent) {
+                    return Some(ResolvedCommand {
+                        command: format!("{} {}", command, session_arg),
+                        prompt_injected: false,
+                    });
+                }
+            }
+        }
+    }
+
     Some(ResolvedCommand {
         command: result.into_owned(),
         prompt_injected,
@@ -155,14 +184,42 @@ pub fn adjust_command<'a>(
     working_dir: &Path,
     effective_agent: Option<&str>,
     shell: &str,
+    session_name: Option<&str>,
 ) -> Cow<'a, str> {
     if let Some(prompt_path) = prompt_file_path
-        && let Some(rewritten) =
-            rewrite_agent_command(command, prompt_path, working_dir, effective_agent, shell)
+        && let Some(rewritten) = rewrite_agent_command(
+            command,
+            prompt_path,
+            working_dir,
+            effective_agent,
+            shell,
+            session_name,
+        )
     {
         return Cow::Owned(rewritten);
     }
     Cow::Borrowed(command)
+}
+
+/// Check if a command matches the configured agent by comparing executable stems.
+fn is_agent_command(command: &str, effective_agent: Option<&str>) -> bool {
+    let Some(agent_cmd) = effective_agent else {
+        return false;
+    };
+
+    let Some((pane_token, _)) = crate::config::split_first_token(command.trim()) else {
+        return false;
+    };
+    let Some((config_token, _)) = crate::config::split_first_token(agent_cmd) else {
+        return false;
+    };
+
+    let resolved_pane = crate::config::resolve_executable_path(pane_token)
+        .unwrap_or_else(|| pane_token.to_string());
+    let resolved_config = crate::config::resolve_executable_path(config_token)
+        .unwrap_or_else(|| config_token.to_string());
+
+    Path::new(&resolved_pane).file_stem() == Path::new(&resolved_config).file_stem()
 }
 
 /// Escape a string for embedding inside a double-quoted shell context.
@@ -262,6 +319,7 @@ mod tests {
             &working_dir,
             Some("claude"),
             "/bin/zsh",
+            None,
         );
         // POSIX shell: no wrapper, prefixed with space to prevent history
         assert_eq!(result, Some(" claude -- \"$(cat PROMPT.md)\"".to_string()));
@@ -278,6 +336,7 @@ mod tests {
             &working_dir,
             Some("gemini"),
             "/bin/bash",
+            None,
         );
         assert_eq!(result, Some(" gemini -i \"$(cat PROMPT.md)\"".to_string()));
     }
@@ -293,6 +352,7 @@ mod tests {
             &working_dir,
             Some("opencode"),
             "/bin/zsh",
+            None,
         );
         assert_eq!(
             result,
@@ -311,6 +371,7 @@ mod tests {
             &working_dir,
             Some("claude"),
             "/bin/bash",
+            None,
         );
         assert_eq!(
             result,
@@ -331,6 +392,7 @@ mod tests {
             &working_dir,
             Some("claude"),
             "/opt/homebrew/bin/nu",
+            None,
         );
         // Non-POSIX shell: wrap in sh -c, prefixed with space
         assert_eq!(
@@ -351,6 +413,7 @@ mod tests {
             &working_dir,
             Some("gemini"),
             "/bin/zsh",
+            None,
         );
         assert_eq!(result, None);
     }
@@ -360,9 +423,93 @@ mod tests {
         let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
         let working_dir = PathBuf::from("/tmp/worktree");
 
-        let result =
-            rewrite_agent_command("", &prompt_file, &working_dir, Some("claude"), "/bin/zsh");
+        let result = rewrite_agent_command(
+            "",
+            &prompt_file,
+            &working_dir,
+            Some("claude"),
+            "/bin/zsh",
+            None,
+        );
         assert_eq!(result, None);
+    }
+
+    // --- rewrite_agent_command tests with session name ---
+
+    #[test]
+    fn test_rewrite_claude_with_session_name() {
+        let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+
+        let result = rewrite_agent_command(
+            "claude",
+            &prompt_file,
+            &working_dir,
+            Some("claude"),
+            "/bin/zsh",
+            Some("feature-auth"),
+        );
+        assert_eq!(
+            result,
+            Some(" claude --resume feature-auth -- \"$(cat PROMPT.md)\"".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_claude_with_args_and_session_name() {
+        let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+
+        let result = rewrite_agent_command(
+            "claude --verbose",
+            &prompt_file,
+            &working_dir,
+            Some("claude"),
+            "/bin/bash",
+            Some("feature-auth"),
+        );
+        assert_eq!(
+            result,
+            Some(" claude --verbose --resume feature-auth -- \"$(cat PROMPT.md)\"".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gemini_session_name_ignored() {
+        let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+
+        // Gemini doesn't support session naming, so session_name is ignored
+        let result = rewrite_agent_command(
+            "gemini",
+            &prompt_file,
+            &working_dir,
+            Some("gemini"),
+            "/bin/zsh",
+            Some("feature-auth"),
+        );
+        assert_eq!(result, Some(" gemini -i \"$(cat PROMPT.md)\"".to_string()));
+    }
+
+    #[test]
+    fn test_rewrite_claude_with_session_name_nushell() {
+        let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+
+        let result = rewrite_agent_command(
+            "claude",
+            &prompt_file,
+            &working_dir,
+            Some("claude"),
+            "/opt/homebrew/bin/nu",
+            Some("feature-auth"),
+        );
+        assert_eq!(
+            result,
+            Some(
+                " sh -c 'claude --resume feature-auth -- \"$(cat PROMPT.md)\"'".to_string()
+            )
+        );
     }
 
     // --- escape_for_double_quotes tests ---
@@ -467,7 +614,8 @@ mod tests {
 
     #[test]
     fn test_resolve_pane_command_none_when_no_command() {
-        let result = resolve_pane_command(None, true, None, Path::new("/tmp"), None, "/bin/zsh");
+        let result =
+            resolve_pane_command(None, true, None, Path::new("/tmp"), None, "/bin/zsh", None);
         assert!(result.is_none());
     }
 
@@ -480,14 +628,22 @@ mod tests {
             Path::new("/tmp"),
             None,
             "/bin/zsh",
+            None,
         );
         assert!(result.is_none());
     }
 
     #[test]
     fn test_resolve_pane_command_returns_command_as_is() {
-        let result =
-            resolve_pane_command(Some("vim"), true, None, Path::new("/tmp"), None, "/bin/zsh");
+        let result = resolve_pane_command(
+            Some("vim"),
+            true,
+            None,
+            Path::new("/tmp"),
+            None,
+            "/bin/zsh",
+            None,
+        );
         let resolved = result.unwrap();
         assert_eq!(resolved.command, "vim");
         assert!(!resolved.prompt_injected);
@@ -502,6 +658,7 @@ mod tests {
             Path::new("/tmp"),
             Some("claude"),
             "/bin/zsh",
+            None,
         );
         let resolved = result.unwrap();
         assert_eq!(resolved.command, "claude");
@@ -517,6 +674,7 @@ mod tests {
             Path::new("/tmp"),
             None,
             "/bin/zsh",
+            None,
         );
         assert!(result.is_none());
     }
@@ -532,6 +690,7 @@ mod tests {
             &working_dir,
             Some("claude"),
             "/bin/zsh",
+            None,
         );
         let resolved = result.unwrap();
         assert!(resolved.prompt_injected);
@@ -549,9 +708,99 @@ mod tests {
             &working_dir,
             Some("claude"),
             "/bin/zsh",
+            None,
         );
         let resolved = result.unwrap();
         assert!(!resolved.prompt_injected);
         assert_eq!(resolved.command, "vim");
+    }
+
+    // --- resolve_pane_command tests with session name ---
+
+    #[test]
+    fn test_resolve_pane_command_claude_with_session_name_no_prompt() {
+        let result = resolve_pane_command(
+            Some("claude"),
+            true,
+            None,
+            Path::new("/tmp"),
+            Some("claude"),
+            "/bin/zsh",
+            Some("feature-auth"),
+        );
+        let resolved = result.unwrap();
+        assert_eq!(resolved.command, "claude --resume feature-auth");
+        assert!(!resolved.prompt_injected);
+    }
+
+    #[test]
+    fn test_resolve_pane_command_claude_with_session_name_and_prompt() {
+        let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+        let result = resolve_pane_command(
+            Some("claude"),
+            true,
+            Some(&prompt),
+            &working_dir,
+            Some("claude"),
+            "/bin/zsh",
+            Some("feature-auth"),
+        );
+        let resolved = result.unwrap();
+        assert!(resolved.prompt_injected);
+        assert_eq!(
+            resolved.command,
+            " claude --resume feature-auth -- \"$(cat PROMPT.md)\""
+        );
+    }
+
+    #[test]
+    fn test_resolve_pane_command_gemini_session_name_ignored() {
+        let result = resolve_pane_command(
+            Some("gemini"),
+            true,
+            None,
+            Path::new("/tmp"),
+            Some("gemini"),
+            "/bin/zsh",
+            Some("feature-auth"),
+        );
+        let resolved = result.unwrap();
+        // Gemini doesn't support session naming
+        assert_eq!(resolved.command, "gemini");
+        assert!(!resolved.prompt_injected);
+    }
+
+    #[test]
+    fn test_resolve_pane_command_non_agent_session_name_ignored() {
+        let result = resolve_pane_command(
+            Some("vim"),
+            true,
+            None,
+            Path::new("/tmp"),
+            Some("claude"),
+            "/bin/zsh",
+            Some("feature-auth"),
+        );
+        let resolved = result.unwrap();
+        // vim doesn't match claude, so session name is not injected
+        assert_eq!(resolved.command, "vim");
+        assert!(!resolved.prompt_injected);
+    }
+
+    #[test]
+    fn test_resolve_pane_command_agent_placeholder_with_session_name() {
+        let result = resolve_pane_command(
+            Some("<agent>"),
+            true,
+            None,
+            Path::new("/tmp"),
+            Some("claude"),
+            "/bin/zsh",
+            Some("feature-auth"),
+        );
+        let resolved = result.unwrap();
+        assert_eq!(resolved.command, "claude --resume feature-auth");
+        assert!(!resolved.prompt_injected);
     }
 }
