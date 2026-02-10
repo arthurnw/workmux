@@ -11,7 +11,7 @@ pub fn run(
     ignore_uncommitted: bool,
     mut rebase: bool,
     mut squash: bool,
-    auto_message: bool,
+    mut auto_message: bool,
     keep: bool,
     no_verify: bool,
     notification: bool,
@@ -28,6 +28,18 @@ pub fn run(
             MergeStrategy::Squash => squash = true,
             MergeStrategy::Merge => {}
         }
+    }
+
+    // Apply auto_message from config if not set via CLI
+    if !auto_message {
+        if let Some(true) = config.auto_message {
+            auto_message = true;
+        }
+    }
+
+    // Validate: auto_message requires squash
+    if auto_message && !squash {
+        anyhow::bail!("--auto-message requires squash merge (use --squash or set merge_strategy: squash in config)");
     }
 
     // Resolve name from argument or current directory

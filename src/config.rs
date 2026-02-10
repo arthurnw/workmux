@@ -185,6 +185,10 @@ pub struct Config {
     #[serde(default)]
     pub merge_strategy: Option<MergeStrategy>,
 
+    /// Whether to auto-generate commit messages using LLM when squash merging
+    #[serde(default)]
+    pub auto_message: Option<bool>,
+
     /// Strategy for deriving worktree/window names from branch names
     #[serde(default)]
     pub worktree_naming: WorktreeNaming,
@@ -658,6 +662,7 @@ impl Config {
             window_prefix,
             agent,
             merge_strategy,
+            auto_message,
             worktree_prefix,
             panes,
             status_format,
@@ -834,6 +839,10 @@ impl Config {
 # Options: merge (default), rebase, squash
 # CLI flags (--rebase, --squash) always override this.
 # merge_strategy: rebase
+
+# Auto-generate commit messages using LLM when squash merging.
+# Requires merge_strategy: squash or --squash flag.
+# auto_message: true
 
 #-------------------------------------------------------------------------------
 # Naming & Paths

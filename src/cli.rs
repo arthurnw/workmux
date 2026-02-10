@@ -267,8 +267,8 @@ enum Commands {
         #[arg(long, group = "merge_strategy")]
         squash: bool,
 
-        /// Generate commit message using LLM (only with --squash)
-        #[arg(long, requires = "squash")]
+        /// Generate commit message using LLM (requires squash, via --squash or config)
+        #[arg(long)]
         auto_message: bool,
 
         /// Keep the worktree, window, and branch after merging (skip cleanup)
