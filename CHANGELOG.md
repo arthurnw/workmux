@@ -14,7 +14,21 @@ description: Release notes and version history for workmux
 
 # Changelog
 
-## v0.1.108 (2026-02-05)
+## v0.1.109 (2026-02-09)
+
+<!-- summary: run command, coordinator commands, light theme -->
+
+- Added coordinator commands for scripting multi-agent workflows:
+  - `send` sends text or file contents to a worktree's agent pane
+  - `capture` reads the last N lines from a worktree's pane output
+  - `status` shows the current state of worktree agents with elapsed time and
+    git info (use `--git` for staged/unstaged indicators)
+  - `wait` blocks until agents reach a target status (working, waiting, or done)
+  - `run` executes a command in a worktree's pane and streams the output in real
+    time.
+- Dashboard now supports light theme via `theme: light` in config
+
+## v0.1.108-fork (2026-02-05)
 
 - Added support for remote branch refs with `--base` flag, enabling stacked PR
   workflows where you base a new branch on a remote that isn't fetched locally
@@ -23,6 +37,15 @@ description: Release notes and version history for workmux
 - Fixed zsh completions preventing file completion and duplicate suggestions
 - Fixed status plugins to better detect when agent needs input
 - Fixed dashboard to show live pane titles instead of stale stored titles
+
+## v0.1.108 (2026-02-07)
+
+- The `list` command now shows an AGENT column displaying the status of agents
+  running in each worktree (working, waiting, done icons)
+- Added positional arguments to `list` for filtering by worktree handle or
+  branch name
+- When piping output, agent status icons are replaced with text labels for
+  compatibility with scripts
 
 ## v0.1.107 (2026-02-04)
 

@@ -24,6 +24,10 @@ Giga opinionated zero-friction workflow tool for managing
 isolated development environments. Perfect for running multiple AI agents in
 parallel without conflict.
 
+📚 **Want more?** Check out the
+[full documentation](https://workmux.raine.dev/guide/) for guides and
+configuration reference.
+
 📖 **New to workmux?** Read the
 [introduction blog post](https://raine.dev/blog/introduction-to-workmux/) for a
 quick overview.
@@ -229,6 +233,7 @@ customize.
 | `window_prefix`  | Prefix for tmux window names                         | `wm-`                   |
 | `agent`          | Default agent for `<agent>` placeholder              | `claude`                |
 | `merge_strategy` | Default merge strategy (`merge`, `rebase`, `squash`) | `merge`                 |
+| `theme`          | Dashboard color theme (`dark`, `light`)              | `dark`                  |
 
 #### Naming options
 
@@ -1085,7 +1090,13 @@ workmux rm --all
 
 ### `workmux list` (alias: `ls`)
 
-Lists all git worktrees with their tmux window status and merge status.
+Lists all git worktrees with their agent status, multiplexer window status, and
+merge status. Supports filtering by worktree handle or branch name.
+
+#### Arguments
+
+- `[worktree-or-branch...]`: Filter by worktree handle (directory name) or
+  branch name. Accepts multiple values. When omitted, shows all worktrees.
 
 #### Options
 
@@ -1102,21 +1113,29 @@ workmux list
 
 # List with PR status
 workmux list --pr
+
+# Filter to specific worktrees
+workmux list my-feature
+workmux list feature-auth feature-api
 ```
 
 #### Example output
 
 ```
-BRANCH      TMUX    UNMERGED    PATH
-------      ----    --------    ----
-main        -       -           ~/project
-user-auth   ✓       -           ~/project__worktrees/user-auth
-bug-fix     ✓       ●           ~/project__worktrees/bug-fix
+BRANCH      AGENT  MUX  UNMERGED  PATH
+main        -      -    -         ~/project
+user-auth   🤖     ✓    -         ~/project__worktrees/user-auth
+bug-fix     ✅     ✓    ●         ~/project__worktrees/bug-fix
+api-work    -      ✓    -         ~/project__worktrees/api-work
 ```
 
 #### Key
 
-- `✓` in TMUX column = tmux window exists for this worktree
+- AGENT shows the current agent status (see
+  [status tracking](https://workmux.dev/guide/status-tracking/)):
+  - `🤖` = working, `💬` = waiting for input, `✅` = finished
+  - Multiple agents per worktree show a count (e.g., `2🤖 1✅`)
+- `✓` in MUX column = multiplexer window exists for this worktree
 - `●` in UNMERGED column = branch has commits not merged into main
 - `-` = not applicable
 

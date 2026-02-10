@@ -89,7 +89,7 @@ _workmux_dynamic() {
 
     # Only handle commands that need dynamic completion
     case "$cmd" in
-        open|remove|rm|path|merge|close)
+        open|remove|rm|path|merge|close|send|capture|status|wait|run)
             # These commands take exactly one positional argument (the handle/branch name)
             # Only offer completions if we haven't provided it yet
             if [[ $positional_count -eq 0 ]]; then

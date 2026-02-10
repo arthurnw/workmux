@@ -314,6 +314,10 @@ enum Commands {
         /// Show PR status for each worktree (requires gh CLI)
         #[arg(long)]
         pr: bool,
+
+        /// Filter by worktree name or branch (supports multiple)
+        #[arg(value_parser = WorktreeBranchParser::new())]
+        filter: Vec<String>,
     },
 
     /// Get the filesystem path of a worktree
@@ -321,6 +325,89 @@ enum Commands {
         /// Worktree name (directory name)
         #[arg(value_parser = WorktreeHandleParser::new())]
         name: String,
+    },
+
+    /// Send a prompt or instruction to a running agent
+    Send {
+        /// Worktree name
+        #[arg(value_parser = WorktreeHandleParser::new())]
+        name: String,
+
+        /// Text to send (reads from --file or stdin if omitted)
+        #[arg(conflicts_with = "file")]
+        text: Option<String>,
+
+        /// Read prompt from file
+        #[arg(short, long, conflicts_with = "text")]
+        file: Option<String>,
+    },
+
+    /// Capture terminal output from a running agent
+    Capture {
+        /// Worktree name
+        #[arg(value_parser = WorktreeHandleParser::new())]
+        name: String,
+
+        /// Number of lines to capture
+        #[arg(short = 'n', long, default_value = "200")]
+        lines: u16,
+    },
+
+    /// Query agent status for worktrees
+    Status {
+        /// Worktree names (default: all with active agents)
+        #[arg(value_parser = WorktreeHandleParser::new())]
+        worktrees: Vec<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Include git info (staged/unstaged changes, unmerged commits)
+        #[arg(long)]
+        git: bool,
+    },
+
+    /// Wait for agents to reach a target status
+    Wait {
+        /// Worktree names to wait on
+        #[arg(required = true, value_parser = WorktreeHandleParser::new())]
+        worktrees: Vec<String>,
+
+        /// Target status to wait for
+        #[arg(long, default_value = "done")]
+        status: String,
+
+        /// Maximum wait time in seconds
+        #[arg(long)]
+        timeout: Option<u64>,
+
+        /// Return when ANY worktree reaches target (default: wait for ALL)
+        #[arg(long)]
+        any: bool,
+    },
+
+    /// Run a command in a worktree's window
+    Run {
+        /// Worktree name
+        #[arg(value_parser = WorktreeHandleParser::new())]
+        name: String,
+
+        /// Command to run (everything after --)
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+
+        /// Run in background without waiting (default: wait and stream output)
+        #[arg(short = 'b', long)]
+        background: bool,
+
+        /// Keep run artifacts after completion (for debugging)
+        #[arg(long)]
+        keep: bool,
+
+        /// Maximum wait time in seconds
+        #[arg(long)]
+        timeout: Option<u64>,
     },
 
     /// Generate example .workmux.yaml configuration file
@@ -382,6 +469,14 @@ enum Commands {
         /// The new base branch
         #[arg(value_parser = GitBranchParser::new())]
         base: String,
+    },
+
+    /// Execute a run spec (internal use)
+    #[command(hide = true, name = "__exec")]
+    Exec {
+        /// Absolute path to run directory
+        #[arg(long)]
+        run_dir: std::path::PathBuf,
     },
 
     /// Switch to the agent that most recently completed its task
@@ -472,7 +567,7 @@ enum InternalCommands {
 fn should_prompt_nerdfont(cmd: &Commands) -> bool {
     matches!(
         cmd,
-        Commands::Add { .. } | Commands::Init | Commands::Dashboard { .. }
+        Commands::Add { .. } | Commands::Init | Commands::Dashboard { .. } | Commands::List { .. }
     )
 }
 
@@ -555,8 +650,31 @@ pub fn run() -> Result<()> {
             force,
             keep_branch,
         } => command::remove::run(names, gone, all, force, keep_branch),
-        Commands::List { pr } => command::list::run(pr),
+        Commands::List { pr, filter } => command::list::run(pr, &filter),
         Commands::Path { name } => command::path::run(&name),
+        Commands::Send { name, text, file } => {
+            command::send::run(&name, text.as_deref(), file.as_deref())
+        }
+        Commands::Capture { name, lines } => command::capture::run(&name, lines),
+        Commands::Status {
+            worktrees,
+            json,
+            git,
+        } => command::status::run(&worktrees, json, git),
+        Commands::Wait {
+            worktrees,
+            status,
+            timeout,
+            any,
+        } => command::wait::run(&worktrees, &status, timeout, any),
+        Commands::Run {
+            name,
+            command,
+            background,
+            keep,
+            timeout,
+        } => command::run::run(&name, command, background, keep, timeout),
+        Commands::Exec { run_dir } => command::exec::run(&run_dir),
         Commands::Init => crate::config::Config::init(),
         Commands::Docs => command::docs::run(),
         Commands::Changelog => command::changelog::run(),

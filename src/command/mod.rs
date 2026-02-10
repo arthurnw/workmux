@@ -1,9 +1,11 @@
 pub mod add;
 pub mod args;
+pub mod capture;
 pub mod changelog;
 pub mod close;
 pub mod dashboard;
 pub mod docs;
+pub mod exec;
 pub mod last_agent;
 pub mod last_done;
 pub mod list;
@@ -12,9 +14,13 @@ pub mod open;
 pub mod path;
 pub mod remove;
 pub mod restore;
+pub mod run;
+pub mod send;
 pub mod session;
 pub mod set_base;
 pub mod set_window_status;
+pub mod status;
+pub mod wait;
 
 use anyhow::{Context, Result, anyhow};
 
