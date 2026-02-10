@@ -157,7 +157,6 @@ pub fn setup_environment(
             PaneSetupOptions {
                 run_commands: options.run_pane_commands,
                 prompt_file_path: options.prompt_file_path.as_deref(),
-                session_name: Some(handle),
             },
             config,
             agent,

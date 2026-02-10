@@ -70,8 +70,6 @@ pub struct PaneSetupOptions<'a> {
     pub run_commands: bool,
     /// Path to the prompt file for agent panes
     pub prompt_file_path: Option<&'a std::path::Path>,
-    /// Session name for agents that support named sessions (e.g., Claude's --resume)
-    pub session_name: Option<&'a str>,
 }
 
 /// Backend type for multiplexer selection

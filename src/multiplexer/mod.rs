@@ -194,7 +194,6 @@ pub trait Multiplexer: Send + Sync {
                 working_dir,
                 effective_agent,
                 &shell,
-                options.session_name,
             );
 
             let pane_id = if let Some(resolved) = adjusted_command {
