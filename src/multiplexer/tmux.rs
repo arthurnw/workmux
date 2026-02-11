@@ -308,6 +308,10 @@ impl Multiplexer for TmuxBackend {
         }
     }
 
+    fn ensure_session(&self, name: &str, cwd: &Path) -> Result<()> {
+        self.ensure_session_exists(name, cwd)
+    }
+
     fn current_session(&self) -> Option<String> {
         self.tmux_query(&["display-message", "-p", "#{session_name}"])
             .ok()

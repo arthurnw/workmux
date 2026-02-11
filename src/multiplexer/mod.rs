@@ -286,6 +286,14 @@ pub trait Multiplexer: Send + Sync {
 
     // === Multi-Session/Workspace Support ===
 
+    /// Ensure a session/workspace exists, creating it if needed.
+    ///
+    /// `cwd` sets the working directory for the session's initial window.
+    /// No-op for backends that don't support named sessions.
+    fn ensure_session(&self, _name: &str, _cwd: &Path) -> Result<()> {
+        Ok(())
+    }
+
     /// Get the current session/workspace name, if determinable.
     ///
     /// Returns None if not running inside the multiplexer.

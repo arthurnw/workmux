@@ -1386,14 +1386,27 @@ def run_workmux_command(
         f"echo $? > {exit_code_str}"
     )
 
-    env.send_keys("test:", workmux_cmd, enter=True)
+    # Write the command to a temp file and source it, instead of sending
+    # the full command directly via send_keys. The inline env vars
+    # (especially PATH) can be very long and cause timeouts when sent
+    # through the pty under parallel test load.
+    fd, script_path = tempfile.mkstemp(suffix=".sh")
+    try:
+        os.write(fd, (workmux_cmd + "\n").encode())
+    finally:
+        os.close(fd)
+
+    env.send_keys("test:", f". {shlex.quote(script_path)}", enter=True)
 
     if not poll_until_file_has_content(exit_code_file, timeout=5.0):
         # Capture pane content for debugging
         pane_content = env.capture_pane("test") or "(empty)"
+        os.unlink(script_path)
         raise AssertionError(
             f"workmux command did not complete in time\nPane content:\n{pane_content}"
         )
+
+    os.unlink(script_path)
 
     result = WorkmuxCommandResult(
         exit_code=int(exit_code_file.read_text().strip()),

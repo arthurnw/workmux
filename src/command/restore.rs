@@ -60,6 +60,13 @@ fn restore_repo(
     let worktrees = git::list_worktrees()?;
     let main_worktree = git::get_main_worktree_root()?;
 
+    // Pre-create the target session with the main worktree root as cwd,
+    // so the session's initial window points at the main checkout rather
+    // than the first restored worktree.
+    if let Some(session) = target_session {
+        context.mux.ensure_session(session, &main_worktree)?;
+    }
+
     println!("Restoring worktrees for {}...", repo_name);
 
     let mut restored = 0;
@@ -105,6 +112,7 @@ fn restore_repo(
         // Open the worktree
         let mut options = SetupOptions::new(false, false, true);
         options.resume_session_id = session_id.clone();
+        options.focus_window = false;
         match workflow::open(&branch, context, options, false, target_session) {
             Ok(_result) => {
                 if let Some(ref id) = session_id {
