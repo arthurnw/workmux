@@ -226,12 +226,13 @@ impl StateStore {
                 }
                 Some(live) if live.current_command != state.command => {
                     // Command changed - agent exited (e.g., "node" -> "zsh")
-                    // Exception: if hooks have never fired (status is None), the
-                    // initial command was likely captured before the agent process
-                    // replaced the shell. Keep these until the first hook confirms
-                    // the agent is running — pane close (PID mismatch) still catches
-                    // genuine exits.
-                    if state.status.is_none() {
+                    // Exceptions:
+                    // - status is None: hooks haven't fired yet, so the command
+                    //   change is likely shell → agent (initial startup).
+                    // - restored: status was carried forward from a prior session.
+                    //   The command change is again shell → agent, not an exit.
+                    // In both cases, keep the state until a hook confirms the agent.
+                    if state.status.is_none() || state.restored {
                         let agent_pane = state.to_agent_pane(
                             live.session.clone().unwrap_or_default(),
                             live.window.clone().unwrap_or_default(),
@@ -334,6 +335,7 @@ mod tests {
             pane_pid: 12345,
             command: "node".to_string(),
             updated_ts: 1234567890,
+            restored: false,
         }
     }
 
@@ -479,6 +481,59 @@ mod tests {
 
         let settings = store.load_settings().unwrap();
         assert_eq!(settings.sort_mode, "");
+    }
+
+    #[test]
+    fn test_restored_field_persists() {
+        let (store, _dir) = test_store();
+        let key = test_pane_key();
+        let mut state = test_agent_state(key.clone());
+        state.restored = true;
+
+        store.upsert_agent(&state).unwrap();
+
+        let retrieved = store.get_agent(&key).unwrap().unwrap();
+        assert!(retrieved.restored);
+    }
+
+    #[test]
+    fn test_restored_field_defaults_false_for_legacy_files() {
+        let (store, dir) = test_store();
+        let key = test_pane_key();
+
+        // Write a JSON file without the "restored" field (legacy format)
+        let legacy_json = serde_json::json!({
+            "pane_key": {"backend": "tmux", "instance": "default", "pane_id": "%1"},
+            "workdir": "/home/user/project",
+            "status": "working",
+            "status_ts": 1234567890,
+            "pane_title": "test",
+            "pane_pid": 12345,
+            "command": "node",
+            "updated_ts": 1234567890
+        });
+        let path = dir.path().join("agents").join(key.to_filename());
+        fs::write(&path, legacy_json.to_string()).unwrap();
+
+        let retrieved = store.get_agent(&key).unwrap().unwrap();
+        assert!(!retrieved.restored);
+    }
+
+    #[test]
+    fn test_drain_orphans_preserves_restored_field() {
+        let (store, _dir) = test_store();
+        let key = test_pane_key();
+        let mut state = test_agent_state(key);
+        state.restored = true;
+        store.upsert_agent(&state).unwrap();
+
+        // Empty live panes = all agents are orphans
+        let live = HashMap::new();
+        let orphans = store.drain_orphans(&live).unwrap();
+
+        assert_eq!(orphans.len(), 1);
+        let orphan = orphans.values().next().unwrap();
+        assert!(orphan.restored);
     }
 
     #[test]

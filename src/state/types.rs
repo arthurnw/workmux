@@ -95,6 +95,13 @@ pub struct AgentState {
     /// Note: This is NOT a heartbeat - only updated when status changes.
     /// Used for staleness detection and recency sorting.
     pub updated_ts: u64,
+
+    /// True when status was carried forward from a prior (orphaned) agent state
+    /// during restore. Prevents reconciliation from deleting the state when the
+    /// foreground command changes (shell → agent transition).
+    /// Cleared automatically when the agent's first hook fires.
+    #[serde(default)]
+    pub restored: bool,
 }
 
 impl AgentState {

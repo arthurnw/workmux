@@ -253,10 +253,15 @@ fn write_initial_agent_state(
             }
         };
 
-        let (status, status_ts, pane_title) = if let Some(prior) = effective_prior {
-            (prior.status, prior.status_ts, prior.pane_title.clone())
+        let (status, status_ts, pane_title, restored) = if let Some(prior) = effective_prior {
+            (
+                prior.status,
+                prior.status_ts,
+                prior.pane_title.clone(),
+                true,
+            )
         } else {
-            (None, None, None)
+            (None, None, None, false)
         };
 
         let state = AgentState {
@@ -272,6 +277,7 @@ fn write_initial_agent_state(
             pane_pid: pid,
             command,
             updated_ts: now,
+            restored,
         };
 
         if let Err(e) = store.upsert_agent(&state) {
@@ -282,9 +288,10 @@ fn write_initial_agent_state(
     // Clean up the orphaned state file (only for runtime-discovered orphans;
     // pre-collected orphans are already deleted by drain_orphans)
     if prior_state.is_none()
-        && let Some(prior) = effective_prior {
-            let _ = store.delete_agent(&prior.pane_key);
-        }
+        && let Some(prior) = effective_prior
+    {
+        let _ = store.delete_agent(&prior.pane_key);
+    }
 }
 
 pub fn resolve_pane_configuration(

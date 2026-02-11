@@ -86,6 +86,7 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
                     pane_pid: live_info.pid,
                     command: live_info.current_command,
                     updated_ts: now,
+                    restored: false,
                 };
 
                 // Write to state store (don't fail the command if this fails)
