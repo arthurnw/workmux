@@ -115,6 +115,15 @@ fn restore_repo(
                     );
                 } else {
                     println!("  {}: opened (no saved session)", handle);
+                    if config.claude.capture_sessions
+                        && let Err(e) = claude::spawn_session_capture(
+                            repo_name,
+                            &branch,
+                            config.claude.capture_timeout,
+                        )
+                    {
+                        tracing::warn!(error = %e, "Failed to spawn session capture");
+                    }
                 }
                 restored += 1;
             }
