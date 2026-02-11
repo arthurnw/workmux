@@ -60,6 +60,16 @@ fn restore_repo(
     let worktrees = git::list_worktrees()?;
     let main_worktree = git::get_main_worktree_root()?;
 
+    // Filter to secondary worktrees only (skip main)
+    let secondary_worktrees: Vec<_> = worktrees
+        .into_iter()
+        .filter(|(p, _)| p != &main_worktree)
+        .collect();
+
+    if secondary_worktrees.is_empty() {
+        return Ok((0, 0));
+    }
+
     // Pre-create the target session with the main worktree root as cwd,
     // so the session's initial window points at the main checkout rather
     // than the first restored worktree.
@@ -72,12 +82,7 @@ fn restore_repo(
     let mut restored = 0;
     let mut skipped = 0;
 
-    for (wt_path, branch) in worktrees {
-        // Skip the main worktree
-        if wt_path == main_worktree {
-            continue;
-        }
-
+    for (wt_path, branch) in secondary_worktrees {
         let handle = wt_path
             .file_name()
             .and_then(|n| n.to_str())

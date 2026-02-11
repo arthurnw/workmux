@@ -133,7 +133,12 @@ pub fn open(
     if let Err(e) = crate::claude::store_repo_path(repo_name, &context.main_worktree_root) {
         tracing::warn!(error = %e, "Failed to store repo path");
     }
-    if let Some(session) = context.mux.current_session()
+    // Use target_session when provided (restore path) to avoid overwriting
+    // the stored session with the current session where restore is running.
+    let session_to_store = target_session
+        .map(|s| s.to_string())
+        .or_else(|| context.mux.current_session());
+    if let Some(session) = session_to_store
         && let Err(e) = crate::claude::store_tmux_session(repo_name, &session)
     {
         tracing::warn!(error = %e, "Failed to store tmux session");
