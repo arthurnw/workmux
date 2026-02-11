@@ -110,7 +110,7 @@ impl DashboardConfig {
 }
 
 /// Configuration for Claude Code integration
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ClaudeConfig {
     /// Auto-trust worktree directories in ~/.claude.json
     /// Default: true
@@ -129,12 +129,28 @@ pub struct ClaudeConfig {
 }
 
 /// Configuration for direnv integration
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DirenvConfig {
     /// Auto-run 'direnv allow' when opening worktrees with .envrc
     /// Default: true
     #[serde(default = "default_true")]
     pub auto_allow: bool,
+}
+
+impl Default for ClaudeConfig {
+    fn default() -> Self {
+        Self {
+            auto_trust: true,
+            capture_sessions: true,
+            capture_timeout: 30,
+        }
+    }
+}
+
+impl Default for DirenvConfig {
+    fn default() -> Self {
+        Self { auto_allow: true }
+    }
 }
 
 fn default_true() -> bool {
@@ -1223,5 +1239,21 @@ mod tests {
         assert!(result.is_some());
         let loc = result.unwrap();
         assert!(loc.config_path.ends_with("backend/.workmux.yaml"));
+    }
+
+    use super::{ClaudeConfig, DirenvConfig};
+
+    #[test]
+    fn claude_config_default_matches_serde_defaults() {
+        let config = ClaudeConfig::default();
+        assert!(config.auto_trust);
+        assert!(config.capture_sessions);
+        assert_eq!(config.capture_timeout, 30);
+    }
+
+    #[test]
+    fn direnv_config_default_matches_serde_defaults() {
+        let config = DirenvConfig::default();
+        assert!(config.auto_allow);
     }
 }
