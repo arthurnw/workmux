@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::github::PrSummary;
 use crate::multiplexer::AgentStatus;
 use crate::prompt::Prompt;
+use crate::state::AgentState;
 
 /// Arguments for creating a worktree
 pub struct CreateArgs<'a> {
@@ -79,6 +80,9 @@ pub struct SetupOptions {
     pub open_if_exists: bool,
     /// Session ID to resume (e.g., Claude --resume <uuid>)
     pub resume_session_id: Option<String>,
+    /// Pre-collected orphan state to carry forward (from drain_orphans).
+    /// When set, skips runtime orphan lookup in write_initial_agent_state.
+    pub prior_agent_state: Option<AgentState>,
 }
 
 impl SetupOptions {
@@ -95,6 +99,7 @@ impl SetupOptions {
             config_root: None,
             open_if_exists: false,
             resume_session_id: None,
+            prior_agent_state: None,
         }
     }
 
@@ -110,6 +115,7 @@ impl SetupOptions {
             config_root: None,
             open_if_exists: false,
             resume_session_id: None,
+            prior_agent_state: None,
         }
     }
 
@@ -131,6 +137,7 @@ impl SetupOptions {
             config_root: None,
             open_if_exists: false,
             resume_session_id: None,
+            prior_agent_state: None,
         }
     }
 }

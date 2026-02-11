@@ -88,6 +88,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
             config_root: options.config_root.clone(),
             open_if_exists: false,
             resume_session_id: None,
+            prior_agent_state: None,
         };
 
         return super::open::open(branch_name, context, open_options, false, None);

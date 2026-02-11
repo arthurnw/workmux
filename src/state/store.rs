@@ -1,6 +1,7 @@
 //! Filesystem-based state persistence for agent state.
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -111,8 +112,36 @@ impl StateStore {
     ) -> Result<Option<AgentState>> {
         let agents = self.list_all_agents()?;
         Ok(agents.into_iter().find(|state| {
-            state.workdir == workdir && !live_pane_ids.contains_key(&state.pane_key.pane_id)
+            if state.workdir != workdir {
+                return false;
+            }
+            match live_pane_ids.get(&state.pane_key.pane_id) {
+                None => true,                             // pane gone
+                Some(live) => live.pid != state.pane_pid, // pane ID recycled
+            }
         }))
+    }
+
+    /// Collect all orphaned agent states, delete their files, and return them
+    /// keyed by workdir. Used by restore to pre-collect orphans before creating
+    /// new panes (avoids pane ID recycling overwriting state files).
+    pub fn drain_orphans(
+        &self,
+        live_pane_ids: &HashMap<String, super::super::multiplexer::LivePaneInfo>,
+    ) -> Result<HashMap<PathBuf, AgentState>> {
+        let agents = self.list_all_agents()?;
+        let mut orphans = HashMap::new();
+        for state in agents {
+            let is_orphan = match live_pane_ids.get(&state.pane_key.pane_id) {
+                None => true,
+                Some(live) => live.pid != state.pane_pid,
+            };
+            if is_orphan {
+                let _ = self.delete_agent(&state.pane_key);
+                orphans.insert(state.workdir.clone(), state);
+            }
+        }
+        Ok(orphans)
     }
 
     /// Delete agent state.

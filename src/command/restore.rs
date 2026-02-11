@@ -1,6 +1,7 @@
 //! Restore command - opens all worktrees with optional Claude session resumption
 
 use crate::multiplexer::{create_backend, detect_backend};
+use crate::state::StateStore;
 use crate::workflow::{SetupOptions, WorkflowContext};
 use crate::{claude, config, git, workflow};
 use anyhow::Result;
@@ -77,6 +78,17 @@ fn restore_repo(
         context.mux.ensure_session(session, &main_worktree)?;
     }
 
+    // Pre-collect all orphaned agent states before creating any new panes.
+    // This prevents pane ID recycling from overwriting state files that
+    // haven't been recovered yet.
+    let mut orphan_map = {
+        let store = StateStore::new().ok();
+        let live = context.mux.get_all_live_pane_info().unwrap_or_default();
+        store
+            .and_then(|s| s.drain_orphans(&live).ok())
+            .unwrap_or_default()
+    };
+
     println!("Restoring worktrees for {}...", repo_name);
 
     let mut restored = 0;
@@ -114,10 +126,24 @@ fn restore_repo(
             continue;
         }
 
-        // Open the worktree
+        // Open the worktree with pre-collected orphan state (if any)
         let mut options = SetupOptions::new(false, false, true);
         options.resume_session_id = session_id.clone();
         options.focus_window = false;
+
+        // Compute effective workdir (matches open.rs logic for config_rel_dir)
+        let effective_workdir = if !context.config_rel_dir.as_os_str().is_empty() {
+            let subdir = wt_path.join(&context.config_rel_dir);
+            if subdir.exists() {
+                subdir
+            } else {
+                wt_path.clone()
+            }
+        } else {
+            wt_path.clone()
+        };
+        options.prior_agent_state = orphan_map.remove(&effective_workdir);
+
         match workflow::open(&branch, context, options, false, target_session) {
             Ok(_result) => {
                 if let Some(ref id) = session_id {

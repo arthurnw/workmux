@@ -176,6 +176,7 @@ pub fn setup_environment(
             mux,
             &pane_setup_result.agent_pane_ids,
             effective_working_dir,
+            options.prior_agent_state.as_ref(),
         );
     }
 
@@ -201,10 +202,15 @@ pub fn setup_environment(
 /// Write initial agent state for newly created agent panes so the dashboard
 /// can display them before the agent sends its first status update.
 ///
-/// If an orphaned state file exists for the same workdir (e.g., from before a
-/// tmux server restart), carries forward its status, timestamp, and title into
-/// the new state, then deletes the orphan.
-fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], working_dir: &Path) {
+/// If `prior_state` is provided (pre-collected by `drain_orphans`), uses it
+/// directly without runtime orphan lookup. Otherwise falls back to runtime
+/// orphan detection via `find_orphan_by_workdir`.
+fn write_initial_agent_state(
+    mux: &dyn Multiplexer,
+    agent_pane_ids: &[String],
+    working_dir: &Path,
+    prior_state: Option<&AgentState>,
+) {
     let store = match StateStore::new() {
         Ok(s) => s,
         Err(e) => {
@@ -220,13 +226,19 @@ fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], w
         .unwrap_or_default()
         .as_secs();
 
-    // Look up orphaned state for this workdir (from before tmux restart)
-    let prior_state = mux.get_all_live_pane_info().ok().and_then(|live| {
-        store
-            .find_orphan_by_workdir(working_dir, &live)
-            .ok()
-            .flatten()
-    });
+    // Use pre-collected orphan if available, otherwise do runtime lookup
+    let runtime_prior: Option<AgentState>;
+    let effective_prior = if prior_state.is_some() {
+        prior_state
+    } else {
+        runtime_prior = mux.get_all_live_pane_info().ok().and_then(|live| {
+            store
+                .find_orphan_by_workdir(working_dir, &live)
+                .ok()
+                .flatten()
+        });
+        runtime_prior.as_ref()
+    };
 
     for pane_id in agent_pane_ids {
         let (pid, command) = match mux.get_live_pane_info(pane_id) {
@@ -241,7 +253,7 @@ fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], w
             }
         };
 
-        let (status, status_ts, pane_title) = if let Some(ref prior) = prior_state {
+        let (status, status_ts, pane_title) = if let Some(prior) = effective_prior {
             (prior.status, prior.status_ts, prior.pane_title.clone())
         } else {
             (None, None, None)
@@ -267,10 +279,12 @@ fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], w
         }
     }
 
-    // Clean up the orphaned state file
-    if let Some(prior) = prior_state {
-        let _ = store.delete_agent(&prior.pane_key);
-    }
+    // Clean up the orphaned state file (only for runtime-discovered orphans;
+    // pre-collected orphans are already deleted by drain_orphans)
+    if prior_state.is_none()
+        && let Some(prior) = effective_prior {
+            let _ = store.delete_agent(&prior.pane_key);
+        }
 }
 
 pub fn resolve_pane_configuration(
@@ -614,6 +628,7 @@ mod tests {
             config_root: None,
             open_if_exists: false,
             resume_session_id: None,
+            prior_agent_state: None,
         }
     }
 
