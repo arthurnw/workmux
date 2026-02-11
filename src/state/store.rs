@@ -99,6 +99,22 @@ impl StateStore {
         Ok(agents)
     }
 
+    /// Find an orphaned agent state by working directory.
+    ///
+    /// Scans all stored agents for one matching the given workdir whose pane
+    /// no longer exists. Used during restore to carry forward the last-known
+    /// status into a newly created agent pane.
+    pub fn find_orphan_by_workdir(
+        &self,
+        workdir: &Path,
+        live_pane_ids: &std::collections::HashMap<String, super::super::multiplexer::LivePaneInfo>,
+    ) -> Result<Option<AgentState>> {
+        let agents = self.list_all_agents()?;
+        Ok(agents.into_iter().find(|state| {
+            state.workdir == workdir && !live_pane_ids.contains_key(&state.pane_key.pane_id)
+        }))
+    }
+
     /// Delete agent state.
     ///
     /// No-op if the file doesn't exist.
@@ -181,9 +197,23 @@ impl StateStore {
                 }
                 Some(live) if live.current_command != state.command => {
                     // Command changed - agent exited (e.g., "node" -> "zsh")
-                    self.delete_agent(&state.pane_key)?;
-                    // Clear stale window status icon from status bar
-                    let _ = mux.clear_status(&state.pane_key.pane_id);
+                    // Exception: if hooks have never fired (status is None), the
+                    // initial command was likely captured before the agent process
+                    // replaced the shell. Keep these until the first hook confirms
+                    // the agent is running — pane close (PID mismatch) still catches
+                    // genuine exits.
+                    if state.status.is_none() {
+                        let agent_pane = state.to_agent_pane(
+                            live.session.clone().unwrap_or_default(),
+                            live.window.clone().unwrap_or_default(),
+                            live.title.clone(),
+                        );
+                        valid_agents.push(agent_pane);
+                    } else {
+                        self.delete_agent(&state.pane_key)?;
+                        // Clear stale window status icon from status bar
+                        let _ = mux.clear_status(&state.pane_key.pane_id);
+                    }
                 }
                 Some(live) => {
                     // Valid - include in dashboard

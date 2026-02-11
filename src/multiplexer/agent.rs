@@ -29,6 +29,14 @@ pub trait AgentProfile: Send + Sync {
         false
     }
 
+    /// Format the resume argument for this agent.
+    ///
+    /// Returns the CLI flag to resume a previous session (e.g., `--resume <uuid>`).
+    /// Returns `None` if this agent doesn't support session resumption.
+    fn resume_argument(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
     /// Format the prompt injection argument for this agent.
     ///
     /// Returns the CLI fragment to append (e.g., `-- "$(cat PROMPT.md)"`).
@@ -52,6 +60,10 @@ impl AgentProfile for ClaudeProfile {
 
     fn needs_auto_status(&self) -> bool {
         true
+    }
+
+    fn resume_argument(&self, session_id: &str) -> Option<String> {
+        Some(format!("--resume {}", session_id))
     }
 }
 
@@ -162,6 +174,10 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-- \"$(cat PROMPT.md)\""
         );
+        assert_eq!(
+            profile.resume_argument("abc-123"),
+            Some("--resume abc-123".to_string())
+        );
     }
 
     #[test]
@@ -174,7 +190,6 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-i \"$(cat PROMPT.md)\""
         );
-
     }
 
     #[test]
@@ -187,7 +202,6 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "--prompt \"$(cat PROMPT.md)\""
         );
-
     }
 
     #[test]
@@ -200,7 +214,6 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-- \"$(cat PROMPT.md)\""
         );
-
     }
 
     #[test]
@@ -213,7 +226,7 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-- \"$(cat PROMPT.md)\""
         );
-
+        assert_eq!(profile.resume_argument("abc-123"), None);
     }
 
     // === resolve_profile tests ===

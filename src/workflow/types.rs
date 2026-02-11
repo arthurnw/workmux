@@ -77,6 +77,8 @@ pub struct SetupOptions {
     pub config_root: Option<PathBuf>,
     /// If true, open existing worktree instead of failing when it already exists.
     pub open_if_exists: bool,
+    /// Session ID to resume (e.g., Claude --resume <uuid>)
+    pub resume_session_id: Option<String>,
 }
 
 impl SetupOptions {
@@ -92,6 +94,7 @@ impl SetupOptions {
             working_dir: None,
             config_root: None,
             open_if_exists: false,
+            resume_session_id: None,
         }
     }
 
@@ -106,6 +109,7 @@ impl SetupOptions {
             working_dir: None,
             config_root: None,
             open_if_exists: false,
+            resume_session_id: None,
         }
     }
 
@@ -126,6 +130,7 @@ impl SetupOptions {
             working_dir: None,
             config_root: None,
             open_if_exists: false,
+            resume_session_id: None,
         }
     }
 }

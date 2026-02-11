@@ -103,7 +103,8 @@ fn restore_repo(
         }
 
         // Open the worktree
-        let options = SetupOptions::new(false, false, true);
+        let mut options = SetupOptions::new(false, false, true);
+        options.resume_session_id = session_id.clone();
         match workflow::open(&branch, context, options, false, target_session) {
             Ok(_result) => {
                 if let Some(ref id) = session_id {

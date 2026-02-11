@@ -100,6 +100,51 @@ pub fn rewrite_agent_command(
     }
 }
 
+/// Injects a resume argument (e.g., `--resume <uuid>`) into an agent command.
+///
+/// Only injects when the command matches the configured agent. Inserts the resume
+/// flag after the executable token, before any user-provided arguments:
+/// - `"claude"` -> `"claude --resume <uuid>"`
+/// - `"claude --verbose"` -> `"claude --resume <uuid> --verbose"`
+///
+/// Returns None if the command shouldn't be modified (no session ID, doesn't match agent, etc.)
+pub fn inject_resume_argument(
+    command: &str,
+    session_id: &str,
+    effective_agent: Option<&str>,
+) -> Option<String> {
+    let agent_command = effective_agent?;
+    let trimmed_command = command.trim();
+    if trimmed_command.is_empty() {
+        return None;
+    }
+
+    let (pane_token, pane_rest) = crate::config::split_first_token(trimmed_command)?;
+    let (config_token, _) = crate::config::split_first_token(agent_command)?;
+
+    let resolved_pane_path = crate::config::resolve_executable_path(pane_token)
+        .unwrap_or_else(|| pane_token.to_string());
+    let resolved_config_path = crate::config::resolve_executable_path(config_token)
+        .unwrap_or_else(|| config_token.to_string());
+
+    let pane_stem = Path::new(&resolved_pane_path).file_stem();
+    let config_stem = Path::new(&resolved_config_path).file_stem();
+
+    if pane_stem != config_stem {
+        return None;
+    }
+
+    let profile = super::agent::resolve_profile(effective_agent);
+    let resume_arg = profile.resume_argument(session_id)?;
+
+    let rest = pane_rest.trim_start();
+    if rest.is_empty() {
+        Some(format!("{} {}", pane_token, resume_arg))
+    } else {
+        Some(format!("{} {} {}", pane_token, resume_arg, rest))
+    }
+}
+
 /// Resolve a pane's command: handle `<agent>` placeholder and adjust for prompt injection.
 ///
 /// Returns the final command to send to the pane, or None if no command should be sent.
@@ -119,6 +164,7 @@ pub fn resolve_pane_command(
     working_dir: &Path,
     effective_agent: Option<&str>,
     shell: &str,
+    resume_session_id: Option<&str>,
 ) -> Option<ResolvedCommand> {
     let command = if pane_command == Some("<agent>") {
         effective_agent?
@@ -129,6 +175,15 @@ pub fn resolve_pane_command(
     if !run_commands {
         return None;
     }
+
+    // Apply resume injection first (before prompt injection),
+    // so the --resume flag lands inside any sh -c wrapper.
+    let with_resume = if let Some(session_id) = resume_session_id {
+        inject_resume_argument(command, session_id, effective_agent)
+    } else {
+        None
+    };
+    let command = with_resume.as_deref().unwrap_or(command);
 
     let result = adjust_command(
         command,
@@ -360,13 +415,8 @@ mod tests {
         let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
         let working_dir = PathBuf::from("/tmp/worktree");
 
-        let result = rewrite_agent_command(
-            "",
-            &prompt_file,
-            &working_dir,
-            Some("claude"),
-            "/bin/zsh",
-        );
+        let result =
+            rewrite_agent_command("", &prompt_file, &working_dir, Some("claude"), "/bin/zsh");
         assert_eq!(result, None);
     }
 
@@ -470,10 +520,48 @@ mod tests {
 
     // --- resolve_pane_command tests ---
 
+    // --- inject_resume_argument tests ---
+
+    #[test]
+    fn test_inject_resume_simple() {
+        let result = inject_resume_argument("claude", "abc-123", Some("claude"));
+        assert_eq!(result, Some("claude --resume abc-123".to_string()));
+    }
+
+    #[test]
+    fn test_inject_resume_with_args() {
+        let result = inject_resume_argument("claude --verbose", "abc-123", Some("claude"));
+        assert_eq!(
+            result,
+            Some("claude --resume abc-123 --verbose".to_string())
+        );
+    }
+
+    #[test]
+    fn test_inject_resume_mismatched_agent() {
+        let result = inject_resume_argument("vim", "abc-123", Some("claude"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_inject_resume_no_agent() {
+        let result = inject_resume_argument("claude", "abc-123", None);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_inject_resume_non_claude_agent() {
+        // Gemini profile doesn't implement resume_argument, should return None
+        let result = inject_resume_argument("gemini", "abc-123", Some("gemini"));
+        assert_eq!(result, None);
+    }
+
+    // --- resolve_pane_command tests ---
+
     #[test]
     fn test_resolve_pane_command_none_when_no_command() {
         let result =
-            resolve_pane_command(None, true, None, Path::new("/tmp"), None, "/bin/zsh");
+            resolve_pane_command(None, true, None, Path::new("/tmp"), None, "/bin/zsh", None);
         assert!(result.is_none());
     }
 
@@ -486,6 +574,7 @@ mod tests {
             Path::new("/tmp"),
             None,
             "/bin/zsh",
+            None,
         );
         assert!(result.is_none());
     }
@@ -499,6 +588,7 @@ mod tests {
             Path::new("/tmp"),
             None,
             "/bin/zsh",
+            None,
         );
         let resolved = result.unwrap();
         assert_eq!(resolved.command, "vim");
@@ -514,6 +604,7 @@ mod tests {
             Path::new("/tmp"),
             Some("claude"),
             "/bin/zsh",
+            None,
         );
         let resolved = result.unwrap();
         assert_eq!(resolved.command, "claude");
@@ -529,6 +620,7 @@ mod tests {
             Path::new("/tmp"),
             None,
             "/bin/zsh",
+            None,
         );
         assert!(result.is_none());
     }
@@ -544,6 +636,7 @@ mod tests {
             &working_dir,
             Some("claude"),
             "/bin/zsh",
+            None,
         );
         let resolved = result.unwrap();
         assert!(resolved.prompt_injected);
@@ -561,10 +654,60 @@ mod tests {
             &working_dir,
             Some("claude"),
             "/bin/zsh",
+            None,
         );
         let resolved = result.unwrap();
         assert!(!resolved.prompt_injected);
         assert_eq!(resolved.command, "vim");
     }
 
+    #[test]
+    fn test_resolve_pane_command_with_resume() {
+        let result = resolve_pane_command(
+            Some("claude"),
+            true,
+            None,
+            Path::new("/tmp"),
+            Some("claude"),
+            "/bin/zsh",
+            Some("abc-123"),
+        );
+        let resolved = result.unwrap();
+        assert_eq!(resolved.command, "claude --resume abc-123");
+        assert!(!resolved.prompt_injected);
+    }
+
+    #[test]
+    fn test_resolve_pane_command_with_resume_and_prompt() {
+        let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+        let result = resolve_pane_command(
+            Some("claude"),
+            true,
+            Some(&prompt),
+            &working_dir,
+            Some("claude"),
+            "/bin/zsh",
+            Some("abc-123"),
+        );
+        let resolved = result.unwrap();
+        assert!(resolved.prompt_injected);
+        assert!(resolved.command.contains("--resume abc-123"));
+        assert!(resolved.command.contains("PROMPT.md"));
+    }
+
+    #[test]
+    fn test_resolve_pane_command_resume_ignored_for_non_agent() {
+        let result = resolve_pane_command(
+            Some("vim"),
+            true,
+            None,
+            Path::new("/tmp"),
+            Some("claude"),
+            "/bin/zsh",
+            Some("abc-123"),
+        );
+        let resolved = result.unwrap();
+        assert_eq!(resolved.command, "vim");
+    }
 }

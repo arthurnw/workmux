@@ -70,6 +70,8 @@ pub struct PaneSetupOptions<'a> {
     pub run_commands: bool,
     /// Path to the prompt file for agent panes
     pub prompt_file_path: Option<&'a std::path::Path>,
+    /// Session ID to resume (e.g., Claude --resume <uuid>)
+    pub resume_session_id: Option<&'a str>,
 }
 
 /// Backend type for multiplexer selection

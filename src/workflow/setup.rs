@@ -157,6 +157,7 @@ pub fn setup_environment(
             PaneSetupOptions {
                 run_commands: options.run_pane_commands,
                 prompt_file_path: options.prompt_file_path.as_deref(),
+                resume_session_id: options.resume_session_id.as_deref(),
             },
             config,
             agent,
@@ -199,6 +200,10 @@ pub fn setup_environment(
 
 /// Write initial agent state for newly created agent panes so the dashboard
 /// can display them before the agent sends its first status update.
+///
+/// If an orphaned state file exists for the same workdir (e.g., from before a
+/// tmux server restart), carries forward its status, timestamp, and title into
+/// the new state, then deletes the orphan.
 fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], working_dir: &Path) {
     let store = match StateStore::new() {
         Ok(s) => s,
@@ -215,6 +220,14 @@ fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], w
         .unwrap_or_default()
         .as_secs();
 
+    // Look up orphaned state for this workdir (from before tmux restart)
+    let prior_state = mux.get_all_live_pane_info().ok().and_then(|live| {
+        store
+            .find_orphan_by_workdir(working_dir, &live)
+            .ok()
+            .flatten()
+    });
+
     for pane_id in agent_pane_ids {
         let (pid, command) = match mux.get_live_pane_info(pane_id) {
             Ok(Some(info)) => (info.pid, info.current_command),
@@ -228,6 +241,12 @@ fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], w
             }
         };
 
+        let (status, status_ts, pane_title) = if let Some(ref prior) = prior_state {
+            (prior.status, prior.status_ts, prior.pane_title.clone())
+        } else {
+            (None, None, None)
+        };
+
         let state = AgentState {
             pane_key: PaneKey {
                 backend: backend_name.clone(),
@@ -235,9 +254,9 @@ fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], w
                 pane_id: pane_id.clone(),
             },
             workdir: working_dir.to_path_buf(),
-            status: None,
-            status_ts: None,
-            pane_title: None,
+            status,
+            status_ts,
+            pane_title,
             pane_pid: pid,
             command,
             updated_ts: now,
@@ -246,6 +265,11 @@ fn write_initial_agent_state(mux: &dyn Multiplexer, agent_pane_ids: &[String], w
         if let Err(e) = store.upsert_agent(&state) {
             warn!(pane_id, error = %e, "Failed to write initial agent state");
         }
+    }
+
+    // Clean up the orphaned state file
+    if let Some(prior) = prior_state {
+        let _ = store.delete_agent(&prior.pane_key);
     }
 }
 
@@ -589,6 +613,7 @@ mod tests {
             working_dir: None,
             config_root: None,
             open_if_exists: false,
+            resume_session_id: None,
         }
     }
 
