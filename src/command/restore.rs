@@ -1,10 +1,12 @@
 //! Restore command - opens all worktrees with optional Claude session resumption
 
 use crate::multiplexer::{create_backend, detect_backend};
-use crate::state::StateStore;
+use crate::state::{AgentState, StateStore};
 use crate::workflow::{SetupOptions, WorkflowContext};
 use crate::{claude, config, git, workflow};
 use anyhow::Result;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 pub fn run(dry_run: bool, all: bool) -> Result<()> {
     if all {
@@ -36,7 +38,7 @@ fn run_single_repo(dry_run: bool) -> Result<()> {
         tracing::warn!(error = %e, "Failed to store tmux session");
     }
 
-    let (restored, skipped) = restore_repo(&context, repo_name, &config, dry_run, None)?;
+    let (restored, skipped) = restore_repo(&context, repo_name, &config, dry_run, None, None)?;
 
     if dry_run {
         println!("\nDry run complete. No changes made.");
@@ -51,12 +53,17 @@ fn run_single_repo(dry_run: bool) -> Result<()> {
 }
 
 /// Restore worktrees for a single repository. Returns (restored, skipped) counts.
+///
+/// When `external_orphans` is provided (the `run_all` path), uses the pre-drained
+/// orphan map instead of calling `drain_orphans()` internally. This prevents the
+/// first repo from consuming and discarding orphan state that belongs to later repos.
 fn restore_repo(
     context: &WorkflowContext,
     repo_name: &str,
     config: &config::Config,
     dry_run: bool,
     target_session: Option<&str>,
+    external_orphans: Option<&mut HashMap<PathBuf, AgentState>>,
 ) -> Result<(usize, usize)> {
     let worktrees = git::list_worktrees()?;
     let main_worktree = git::get_main_worktree_root()?;
@@ -78,15 +85,21 @@ fn restore_repo(
         context.mux.ensure_session(session, &main_worktree)?;
     }
 
-    // Pre-collect all orphaned agent states before creating any new panes.
-    // This prevents pane ID recycling from overwriting state files that
-    // haven't been recovered yet.
-    let mut orphan_map = {
-        let store = StateStore::new().ok();
-        let live = context.mux.get_all_live_pane_info().unwrap_or_default();
-        store
-            .and_then(|s| s.drain_orphans(&live).ok())
-            .unwrap_or_default()
+    // Use external orphans if provided (run_all path), otherwise drain locally
+    // (single-repo path). This ensures drain_orphans() is called only once
+    // across all repos in the run_all case.
+    let mut local_orphans;
+    let orphan_map: &mut HashMap<PathBuf, AgentState> = if let Some(ext) = external_orphans {
+        ext
+    } else {
+        local_orphans = {
+            let store = StateStore::new().ok();
+            let live = context.mux.get_all_live_pane_info().unwrap_or_default();
+            store
+                .and_then(|s| s.drain_orphans(&live).ok())
+                .unwrap_or_default()
+        };
+        &mut local_orphans
     };
 
     println!("Restoring worktrees for {}...", repo_name);
@@ -192,6 +205,19 @@ fn run_all(dry_run: bool) -> Result<()> {
     let mut total_skipped = 0;
     let mut total_failed = 0;
 
+    // Pre-drain ALL orphans once before processing any repos.
+    // drain_orphans() deletes state files as it reads them, so calling it
+    // per-repo would cause the first repo to consume all orphan data and
+    // leave subsequent repos with no agent status to recover.
+    let mut global_orphan_map = {
+        let store = StateStore::new().ok();
+        let mux = create_backend(detect_backend());
+        let live = mux.get_all_live_pane_info().unwrap_or_default();
+        store
+            .and_then(|s| s.drain_orphans(&live).ok())
+            .unwrap_or_default()
+    };
+
     for (name, path) in &repos {
         // Change to repo directory so git/config operations work
         if let Err(e) = std::env::set_current_dir(path) {
@@ -229,7 +255,14 @@ fn run_all(dry_run: bool) -> Result<()> {
             .unwrap_or(None)
             .unwrap_or_else(|| name.to_string());
 
-        match restore_repo(&context, name, &config, dry_run, Some(&target_session)) {
+        match restore_repo(
+            &context,
+            name,
+            &config,
+            dry_run,
+            Some(&target_session),
+            Some(&mut global_orphan_map),
+        ) {
             Ok((restored, skipped)) => {
                 total_restored += restored;
                 total_skipped += skipped;
