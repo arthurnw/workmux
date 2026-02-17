@@ -206,11 +206,15 @@ impl Multiplexer for TmuxBackend {
             .to_str()
             .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
 
+        let session_target = params.target_session.map(|s| format!("{}:", s));
         let mut cmd = Cmd::new("tmux").args(&["new-window", "-d"]);
 
         // Insert after the target window if specified (keeps workmux windows grouped)
         if let Some(target) = params.after_window {
             cmd = cmd.arg("-a").args(&["-t", target]);
+        } else if let Some(ref target) = session_target {
+            // Target a specific session when no insertion point is specified
+            cmd = cmd.args(&["-t", target]);
         }
 
         // Use -P to print pane info, -F to format output to just the pane ID
