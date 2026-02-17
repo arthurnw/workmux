@@ -13,6 +13,8 @@ mod multiplexer;
 mod naming;
 mod nerdfont;
 mod prompt;
+mod sandbox;
+mod shell;
 mod spinner;
 mod state;
 mod template;

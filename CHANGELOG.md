@@ -2,6 +2,8 @@
 description: Release notes and version history for workmux
 ---
 
+<!-- skipped: v0.1.115 -->
+<!-- skipped: v0.1.113 -->
 <!-- skipped: v0.1.89 -->
 <!-- skipped: v0.1.82 -->
 <!-- skipped: v0.1.73 -->
@@ -13,6 +15,46 @@ description: Release notes and version history for workmux
 <!-- skipped: v0.1.8 -->
 
 # Changelog
+
+## v0.1.117 (2026-02-16)
+
+- Fixed backend detection for nested multiplexers (e.g., tmux inside kitty or
+  wezterm) so workmux correctly targets the innermost multiplexer
+  ([#53](https://github.com/raine/workmux/issues/53))
+- Added `WORKMUX_BACKEND` environment variable to explicitly override backend
+  auto-detection (accepts `tmux`, `wezterm`, or `kitty`)
+
+## v0.1.116 (2026-02-15)
+
+- Fixed hooks and run commands failing when they use bash-specific syntax (e.g.,
+  arrays, process substitution), by using bash instead of sh for execution
+  ([#52](https://github.com/raine/workmux/pull/52))
+
+## v0.1.114 (2026-02-15)
+
+- Sandbox: Host git identity (user.name, user.email) is now automatically
+  available inside sandbox environments, so git commits from sandboxed agents
+  use the correct author
+
+## v0.1.112 (2026-02-13)
+
+- Added sandbox support for running agents in isolated environments. Two
+  backends: containers (Docker/Podman) for ephemeral sessions, and Lima VMs for
+  persistent machines with built-in Nix/Devbox toolchain support. See the
+  [sandbox guide](https://workmux.raine.dev/guide/sandbox/) for setup.
+
+## v0.1.111 (2026-02-12)
+
+- Dashboard: Added Ctrl+N/Ctrl+P as alternative keybindings for navigating
+  between rows
+- Fixed bash completion panic when generating completions
+  ([#51](https://github.com/raine/workmux/pull/51))
+
+## v0.1.110 (2026-02-11)
+
+- Added kitty as an alternative terminal backend -- detected automatically when
+  running inside kitty
+- Improved window cleanup handling for non-tmux backends
 
 ## v0.1.109 (2026-02-09)
 

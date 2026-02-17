@@ -18,6 +18,7 @@ pub fn merge(
     auto_message: bool,
     keep: bool,
     no_verify: bool,
+    no_hooks: bool,
     notification: bool,
     context: &WorkflowContext,
 ) -> Result<MergeResult> {
@@ -30,6 +31,7 @@ pub fn merge(
         auto_message,
         keep,
         no_verify,
+        no_hooks,
         "merge:start"
     );
 
@@ -190,8 +192,9 @@ pub fn merge(
     git::switch_branch_in_worktree(&target_worktree_path, target_branch)?;
 
     // Run pre-merge hooks after all validations pass but before any merge operations begin.
-    // Skip hooks if --no-verify flag is passed.
+    // Skip hooks if --no-verify or --no-hooks flag is passed.
     if !no_verify
+        && !no_hooks
         && let Some(hooks) = &context.config.pre_merge
         && !hooks.is_empty()
     {
@@ -342,6 +345,7 @@ pub fn merge(
         &worktree_path,
         true,
         false, // keep_branch: always delete when merging
+        no_hooks,
     )?;
 
     // Navigate to the target branch window and close the source window

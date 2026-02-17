@@ -4,7 +4,7 @@ description: A workflow tool for managing git worktrees and tmux windows as isol
 
 # What is workmux?
 
-workmux is a giga opinionated zero-friction workflow tool for managing [git worktrees](https://git-scm.com/docs/git-worktree) and tmux windows as isolated development environments. Perfect for running multiple AI agents in parallel without conflict.
+workmux is a giga opinionated zero-friction workflow tool for managing [git worktrees](https://git-scm.com/docs/git-worktree) and tmux windows as isolated development environments. Also supports [kitty](/guide/kitty) and [WezTerm](/guide/wezterm) (experimental). Perfect for running multiple AI agents in parallel without conflict.
 
 ::: tip New to workmux?
 Read the [introduction blog post](https://raine.dev/blog/introduction-to-workmux/) for a quick overview.
@@ -19,7 +19,7 @@ each with its own AI agent. No stashing, no branch switching, no conflicts.
 state, editor session, dev server, and AI agent. Context switching is switching tabs.
 
 **tmux is the interface.** For existing and new tmux users. If you already live
-in tmux, it fits your workflow. If you don't, [it's worth picking up](https://raine.dev/blog/my-tmux-setup/).
+in tmux, it fits your workflow. If you don't, [it's worth picking up](https://raine.dev/blog/my-tmux-setup/). Also supports [kitty](/guide/kitty) and [WezTerm](/guide/wezterm) as experimental alternatives.
 
 <div class="terminal-window">
   <div class="terminal-header">
@@ -117,7 +117,7 @@ in tmux, it fits your workflow. If you don't, [it's worth picking up](https://ra
 
 ## Features
 
-- Create git worktrees with matching tmux windows in a single command (`add`)
+- Create git worktrees with matching tmux windows (or kitty/WezTerm tabs) in a single command (`add`)
 - Merge branches and clean up everything (worktree, tmux window, branches) in one command (`merge`)
 - [Dashboard](/guide/dashboard/) for monitoring agents, reviewing changes, and sending commands
 - [Delegate tasks to worktree agents](/guide/skills#-worktree) with a `/worktree` skill
@@ -125,6 +125,7 @@ in tmux, it fits your workflow. If you don't, [it's worth picking up](https://ra
 - Automatically set up your preferred tmux pane layout (editor, shell, watchers, etc.)
 - Run post-creation hooks (install dependencies, setup database, etc.)
 - Copy or symlink configuration files (`.env`, `node_modules`) into new worktrees
+- [Sandbox agents](/guide/sandbox/) in containers or VMs for enhanced security
 - [Automatic branch name generation](/reference/commands/add#automatic-branch-name-generation) from prompts using LLM
 - Shell completions
 
@@ -183,7 +184,7 @@ In a standard Git setup, switching branches disrupts your flow by requiring a cl
 ## Requirements
 
 - Git 2.5+ (for worktree support)
-- tmux (or [WezTerm](/guide/wezterm))
+- tmux (or [WezTerm](/guide/wezterm) or [kitty](/guide/kitty))
 
 ## Inspiration and related tools
 

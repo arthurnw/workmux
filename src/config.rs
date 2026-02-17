@@ -249,6 +249,10 @@ pub struct Config {
     /// Color theme for the dashboard (dark or light)
     #[serde(default)]
     pub theme: Theme,
+
+    /// Container sandbox configuration
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 }
 
 /// Configuration for a single tmux pane
@@ -319,6 +323,502 @@ pub enum WorktreeNaming {
     Full,
     /// Use only the part after the last `/` (e.g., `prj-123/feature` → `feature`)
     Basename,
+}
+
+/// Sandbox backend type
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxBackend {
+    /// Docker/Podman containers (default)
+    #[default]
+    Container,
+    /// Lima VM backend
+    Lima,
+}
+
+/// Container runtime for sandbox
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxRuntime {
+    /// Docker (default fallback when neither runtime is found in PATH)
+    #[default]
+    Docker,
+    /// Podman
+    Podman,
+}
+
+impl SandboxRuntime {
+    /// Auto-detect container runtime by checking PATH.
+    ///
+    /// Returns the first available runtime found in PATH, preferring docker over
+    /// podman. Falls back to Docker if neither is found (will fail later with a
+    /// clear "command not found" error).
+    pub fn detect() -> Self {
+        if which("docker").is_ok() {
+            SandboxRuntime::Docker
+        } else if which("podman").is_ok() {
+            SandboxRuntime::Podman
+        } else {
+            debug!("neither docker nor podman found in PATH, defaulting to docker");
+            SandboxRuntime::Docker
+        }
+    }
+
+    /// Returns the default hostname that a container guest should use to reach the host.
+    ///
+    /// - Docker: `host.docker.internal` (Docker Desktop built-in)
+    /// - Podman: `host.containers.internal` (Podman built-in)
+    pub fn rpc_host_address(&self) -> &'static str {
+        match self {
+            SandboxRuntime::Docker => "host.docker.internal",
+            SandboxRuntime::Podman => "host.containers.internal",
+        }
+    }
+}
+
+/// Isolation level for Lima backend
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IsolationLevel {
+    /// Single shared VM for all projects (fastest)
+    Shared,
+    /// One VM per git repository (default, balanced)
+    #[default]
+    Project,
+}
+
+/// Which panes to sandbox
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxTarget {
+    /// Only sandbox agent panes (default, recommended)
+    #[default]
+    Agent,
+    /// Sandbox all panes
+    All,
+}
+
+/// Toolchain integration mode for Lima sandboxes.
+/// Controls whether devbox.json/flake.nix are detected and used
+/// to wrap agent commands with the appropriate environment.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolchainMode {
+    /// Auto-detect devbox.json or flake.nix and wrap commands (default)
+    #[default]
+    Auto,
+    /// Disable toolchain integration
+    Off,
+    /// Force Devbox mode (use devbox.json)
+    Devbox,
+    /// Force Nix flake mode (use flake.nix)
+    Flake,
+}
+
+/// An extra mount point for the sandbox.
+///
+/// Supports two forms:
+/// - Simple string: `"~/my-notes"` (read-only, mirrored path)
+/// - Detailed spec: `{ host_path: "~/data", guest_path: "/mnt/data", writable: true }`
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum ExtraMount {
+    /// Simple host path (read-only, guest path mirrors host path)
+    Path(String),
+    /// Detailed mount specification
+    Spec {
+        host_path: String,
+        #[serde(default)]
+        guest_path: Option<String>,
+        #[serde(default)]
+        writable: Option<bool>,
+    },
+}
+
+impl ExtraMount {
+    /// Resolve the mount to (host_path, guest_path, read_only).
+    /// Expands `~` in host_path to the user's home directory.
+    /// Returns an error if host_path or guest_path is not absolute after expansion.
+    pub fn resolve(&self) -> anyhow::Result<(PathBuf, PathBuf, bool)> {
+        let (host_str, guest_str, writable) = match self {
+            Self::Path(p) => (p.as_str(), None, false),
+            Self::Spec {
+                host_path,
+                guest_path,
+                writable,
+            } => (
+                host_path.as_str(),
+                guest_path.as_deref(),
+                writable.unwrap_or(false),
+            ),
+        };
+
+        let host_path = expand_tilde(host_str);
+        if !host_path.is_absolute() {
+            anyhow::bail!(
+                "extra_mounts: host path must be absolute (got '{}'). Use an absolute path or ~/.",
+                host_str
+            );
+        }
+
+        let guest_path = guest_str
+            .map(PathBuf::from)
+            .unwrap_or_else(|| host_path.clone());
+        if !guest_path.is_absolute() {
+            anyhow::bail!(
+                "extra_mounts: guest_path must be absolute (got '{}')",
+                guest_str.unwrap_or("")
+            );
+        }
+
+        let read_only = !writable;
+        Ok((host_path, guest_path, read_only))
+    }
+}
+
+/// Expand `~` or `~/...` to the user's home directory.
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = home::home_dir() {
+            return home.join(rest);
+        }
+    } else if path == "~"
+        && let Some(home) = home::home_dir()
+    {
+        return home;
+    }
+    PathBuf::from(path)
+}
+
+/// Lima-specific sandbox configuration.
+/// Nested under `sandbox.lima` in YAML.
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct LimaConfig {
+    /// Isolation level. Default: project
+    #[serde(default)]
+    pub isolation: Option<IsolationLevel>,
+
+    /// Projects directory for shared isolation (required when isolation: shared)
+    #[serde(default)]
+    pub projects_dir: Option<PathBuf>,
+
+    /// Number of CPUs for Lima VMs. Default: 4 (Lima default)
+    #[serde(default)]
+    pub cpus: Option<u32>,
+
+    /// Memory for Lima VMs (e.g. "4GiB", "8GiB"). Default: "4GiB" (Lima default)
+    #[serde(default)]
+    pub memory: Option<String>,
+
+    /// Disk size for Lima VMs (e.g. "100GiB"). Default: "100GiB" (Lima default)
+    #[serde(default)]
+    pub disk: Option<String>,
+
+    /// Custom user provision script run once during Lima VM creation,
+    /// after built-in system and user provisioning steps.
+    /// Runs as user (not root). Use `sudo` for system-level commands.
+    #[serde(default)]
+    pub provision: Option<String>,
+
+    /// Skip built-in provisioning scripts (system dependencies and tool installation).
+    /// Useful when using a custom image that already has everything pre-installed.
+    /// Custom `provision` script still runs if specified.
+    #[serde(default)]
+    pub skip_default_provision: Option<bool>,
+}
+
+impl LimaConfig {
+    pub fn isolation(&self) -> IsolationLevel {
+        self.isolation.clone().unwrap_or_default()
+    }
+
+    pub fn cpus(&self) -> u32 {
+        self.cpus.unwrap_or(4)
+    }
+
+    pub fn memory(&self) -> &str {
+        self.memory.as_deref().unwrap_or("4GiB")
+    }
+
+    pub fn disk(&self) -> &str {
+        self.disk.as_deref().unwrap_or("100GiB")
+    }
+
+    pub fn provision_script(&self) -> Option<&str> {
+        self.provision.as_deref().filter(|s| !s.trim().is_empty())
+    }
+
+    pub fn skip_default_provision(&self) -> bool {
+        self.skip_default_provision.unwrap_or(false)
+    }
+
+    /// Merge: project overrides global, per-field.
+    fn merge(global: Self, project: Self) -> Self {
+        Self {
+            isolation: project.isolation.or(global.isolation),
+            projects_dir: project.projects_dir.or(global.projects_dir),
+            cpus: project.cpus.or(global.cpus),
+            memory: project.memory.or(global.memory),
+            disk: project.disk.or(global.disk),
+            provision: project.provision.or(global.provision),
+            skip_default_provision: project
+                .skip_default_provision
+                .or(global.skip_default_provision),
+        }
+    }
+}
+
+/// Container-specific sandbox configuration.
+/// Nested under `sandbox.container` in YAML.
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct ContainerConfig {
+    /// Container runtime. Auto-detected from PATH if not set.
+    #[serde(default)]
+    pub runtime: Option<SandboxRuntime>,
+}
+
+impl ContainerConfig {
+    pub fn runtime(&self) -> SandboxRuntime {
+        self.runtime.clone().unwrap_or_else(SandboxRuntime::detect)
+    }
+
+    /// Merge: project overrides global, per-field.
+    fn merge(global: Self, project: Self) -> Self {
+        Self {
+            runtime: project.runtime.or(global.runtime),
+        }
+    }
+}
+
+/// Network restriction policy for sandboxed containers.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkPolicy {
+    /// No network restrictions (default).
+    Allow,
+    /// Block all outbound except whitelisted domains via CONNECT proxy.
+    Deny,
+}
+
+/// Network restriction configuration for the container sandbox.
+///
+/// When `policy` is `deny`, all outbound connections are blocked except those
+/// to whitelisted domains via an HTTP CONNECT proxy. An iptables firewall
+/// inside the container enforces that only the proxy and RPC ports are
+/// reachable, preventing bypass via direct connections.
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct NetworkConfig {
+    /// Network restriction policy. Default: allow (no restrictions).
+    /// Set to "deny" to block all outbound except whitelisted domains.
+    #[serde(default)]
+    pub policy: Option<NetworkPolicy>,
+
+    /// Allowed outbound HTTPS domains when policy is "deny".
+    /// Supports exact matches and wildcard prefixes (e.g., "*.googleapis.com").
+    /// The host RPC endpoint is always allowed regardless of this list.
+    #[serde(default)]
+    pub allowed_domains: Option<Vec<String>>,
+}
+
+impl NetworkConfig {
+    /// Get the effective network policy. Default: Allow.
+    pub fn policy(&self) -> NetworkPolicy {
+        self.policy.clone().unwrap_or(NetworkPolicy::Allow)
+    }
+
+    /// Get the allowed domains list (empty if not set).
+    pub fn allowed_domains(&self) -> &[String] {
+        self.allowed_domains.as_deref().unwrap_or(&[])
+    }
+
+    /// Validate all domain entries. Called at config load time.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for domain in self.allowed_domains() {
+            validate_domain(domain)?;
+        }
+        Ok(())
+    }
+}
+
+/// Validate a single domain entry for the allowed_domains list.
+fn validate_domain(domain: &str) -> anyhow::Result<()> {
+    use std::net::IpAddr;
+    // Reject IP literals
+    if domain.parse::<IpAddr>().is_ok() {
+        anyhow::bail!("IP literals not allowed in allowed_domains: {}", domain);
+    }
+    // Reject trailing dots
+    if domain.ends_with('.') {
+        anyhow::bail!("trailing dot not allowed in domain: {}", domain);
+    }
+    // Wildcard must be *.suffix form only
+    if domain.contains('*') && !domain.starts_with("*.") {
+        anyhow::bail!("invalid wildcard pattern (must be *.suffix): {}", domain);
+    }
+    // Empty domains
+    if domain.is_empty() {
+        anyhow::bail!("empty domain not allowed in allowed_domains");
+    }
+    Ok(())
+}
+
+/// Configuration for sandboxing (Container or Lima)
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct SandboxConfig {
+    /// Enable sandboxing. Default: false
+    #[serde(default)]
+    pub enabled: Option<bool>,
+
+    /// Sandbox backend. Default: container
+    #[serde(default)]
+    pub backend: Option<SandboxBackend>,
+
+    /// Which panes to sandbox. Default: agent
+    #[serde(default)]
+    pub target: Option<SandboxTarget>,
+
+    /// Container/VM image. For containers: Docker image name.
+    /// For Lima: qcow2 image URL or file:// path.
+    #[serde(default)]
+    pub image: Option<String>,
+
+    /// Environment variables to pass to sandbox.
+    /// Default: []
+    #[serde(default)]
+    pub env_passthrough: Option<Vec<String>>,
+
+    /// Override the hostname used by containers to reach the host RPC server.
+    /// Defaults to `host.docker.internal` (Docker) or `host.containers.internal` (Podman).
+    /// Useful for non-standard Podman or custom networking setups.
+    #[serde(default)]
+    pub rpc_host: Option<String>,
+
+    /// Toolchain integration mode for sandboxes.
+    /// Controls automatic detection and use of devbox.json/flake.nix.
+    /// Default: auto (detect and wrap automatically)
+    #[serde(default)]
+    pub toolchain: Option<ToolchainMode>,
+
+    /// Commands to proxy from guest to host via host-exec RPC.
+    /// When set, shims are created in the guest VM that forward these
+    /// commands to the host's toolchain environment.
+    #[serde(default)]
+    pub host_commands: Option<Vec<String>>,
+
+    /// Extra mount points for the sandbox.
+    /// Paths are mounted read-only by default. Supports simple string paths
+    /// or detailed specs with guest_path and writable options.
+    #[serde(default)]
+    pub extra_mounts: Option<Vec<ExtraMount>>,
+
+    /// Custom host directory for agent config (mounted instead of the default).
+    /// Supports `{agent}` placeholder, e.g. `~/sandbox-config/{agent}`.
+    /// When not set, defaults to the agent's standard config directory
+    /// (e.g. `~/.claude/`, `~/.gemini/`).
+    #[serde(default)]
+    pub agent_config_dir: Option<String>,
+
+    /// Lima-specific configuration
+    #[serde(default)]
+    pub lima: LimaConfig,
+
+    /// Container-specific configuration
+    #[serde(default)]
+    pub container: ContainerConfig,
+
+    /// Network restriction configuration (container backend only).
+    #[serde(default)]
+    pub network: NetworkConfig,
+
+    /// Allow host-exec to run without bwrap sandboxing on Linux.
+    /// Default: false (fail closed -- refuse to run if bwrap is missing).
+    /// When true, falls back to unsandboxed execution with a warning.
+    #[serde(default)]
+    pub dangerously_allow_unsandboxed_host_exec: Option<bool>,
+}
+
+impl SandboxConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+
+    pub fn backend(&self) -> SandboxBackend {
+        self.backend.clone().unwrap_or_default()
+    }
+
+    pub fn runtime(&self) -> SandboxRuntime {
+        self.container.runtime()
+    }
+
+    pub fn target(&self) -> SandboxTarget {
+        self.target.clone().unwrap_or_default()
+    }
+
+    /// Get the image name, falling back to the default ghcr.io image for the agent.
+    ///
+    /// `agent` must be a canonical agent name (e.g. "claude", "codex"), not a raw
+    /// command string. Use `resolve_profile().name()` to obtain it.
+    pub fn resolved_image(&self, agent: &str) -> String {
+        match &self.image {
+            Some(image) => image.clone(),
+            None => format!("{}:{}", crate::sandbox::DEFAULT_IMAGE_REGISTRY, agent),
+        }
+    }
+
+    pub fn env_passthrough(&self) -> Vec<&str> {
+        self.env_passthrough
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get the RPC host address, using config override or runtime default.
+    pub fn resolved_rpc_host(&self) -> String {
+        self.rpc_host
+            .clone()
+            .unwrap_or_else(|| self.runtime().rpc_host_address().to_string())
+    }
+
+    pub fn toolchain(&self) -> ToolchainMode {
+        self.toolchain.clone().unwrap_or_default()
+    }
+
+    pub fn host_commands(&self) -> &[String] {
+        self.host_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub fn extra_mounts(&self) -> &[ExtraMount] {
+        self.extra_mounts.as_deref().unwrap_or(&[])
+    }
+
+    pub fn allow_unsandboxed_host_exec(&self) -> bool {
+        self.dangerously_allow_unsandboxed_host_exec
+            .unwrap_or(false)
+    }
+
+    /// Returns true if network policy is deny (restrictions active).
+    pub fn network_policy_is_deny(&self) -> bool {
+        self.network.policy() == NetworkPolicy::Deny
+    }
+
+    /// Returns the resolved agent config directory path for the given agent.
+    /// Performs `{agent}` substitution and tilde expansion on the configured path.
+    /// Falls back to the agent's default config directory when not configured.
+    pub fn resolved_agent_config_dir(&self, agent: &str) -> Option<PathBuf> {
+        if let Some(ref dir) = self.agent_config_dir {
+            let expanded = dir.replace("{agent}", agent);
+            Some(expand_tilde(&expanded))
+        } else {
+            let home = home::home_dir()?;
+            match agent {
+                "claude" => Some(home.join(".claude")),
+                "gemini" => Some(home.join(".gemini")),
+                "codex" => Some(home.join(".codex")),
+                "opencode" => Some(home.join(".local/share/opencode")),
+                _ => None,
+            }
+        }
+    }
 }
 
 /// Result of config discovery, including the relative path from repo root
@@ -471,6 +971,21 @@ pub fn validate_panes_config(panes: &[PaneConfig]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Get the path to the global config file.
+/// Prefers existing .yml file to avoid shadowing, otherwise defaults to .yaml.
+pub fn global_config_path() -> Option<PathBuf> {
+    let home = home::home_dir()?;
+    let yaml = home.join(".config/workmux/config.yaml");
+    let yml = home.join(".config/workmux/config.yml");
+
+    // Prefer existing .yml file to avoid shadowing user's config
+    if yml.exists() && !yaml.exists() {
+        Some(yml)
+    } else {
+        Some(yaml)
+    }
+}
+
 impl Config {
     /// Load and merge global and project configurations.
     pub fn load(cli_agent: Option<&str>) -> anyhow::Result<Self> {
@@ -513,6 +1028,8 @@ impl Config {
                 config.panes = Some(Self::default_panes());
             }
         }
+
+        config.sandbox.network.validate()?;
 
         debug!(
             agent = ?config.agent,
@@ -567,6 +1084,8 @@ impl Config {
         } else if config.panes.is_none() {
             config.panes = Some(Self::default_panes());
         }
+
+        config.sandbox.network.validate()?;
 
         debug!(
             agent = ?config.agent,
@@ -758,6 +1277,118 @@ impl Config {
             } else {
                 self.direnv.auto_allow
             },
+        };
+
+        // Sandbox config: per-field override with nested struct merging
+        merged.sandbox = SandboxConfig {
+            enabled: project.sandbox.enabled.or(self.sandbox.enabled),
+            backend: project
+                .sandbox
+                .backend
+                .clone()
+                .or(self.sandbox.backend.clone()),
+            target: project
+                .sandbox
+                .target
+                .clone()
+                .or(self.sandbox.target.clone()),
+            // Security: image is global-only. Project config cannot
+            // set it -- this prevents a malicious repo from using an
+            // untrusted image via .workmux.yaml.
+            image: {
+                if project.sandbox.image.is_some() {
+                    tracing::warn!(
+                        "image in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                self.sandbox.image.clone()
+            },
+            // Security: env_passthrough is global-only. Project config cannot
+            // set it -- this prevents a malicious repo from requesting
+            // passthrough of host env secrets via .workmux.yaml.
+            env_passthrough: {
+                if project.sandbox.env_passthrough.is_some() {
+                    tracing::warn!(
+                        "env_passthrough in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                self.sandbox.env_passthrough.clone()
+            },
+            // Security: rpc_host is global-only. Project config cannot
+            // set it -- this prevents a malicious repo from redirecting
+            // RPC traffic to attacker infrastructure via .workmux.yaml.
+            rpc_host: {
+                if project.sandbox.rpc_host.is_some() {
+                    tracing::warn!(
+                        "rpc_host in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                self.sandbox.rpc_host.clone()
+            },
+            toolchain: project
+                .sandbox
+                .toolchain
+                .clone()
+                .or(self.sandbox.toolchain.clone()),
+            // Security: host_commands is global-only. Project config cannot
+            // set it -- this prevents a malicious repo from granting itself
+            // host-exec access via .workmux.yaml.
+            host_commands: {
+                if project.sandbox.host_commands.is_some() {
+                    tracing::warn!(
+                        "host_commands in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                self.sandbox.host_commands.clone()
+            },
+            // Security: extra_mounts is global-only. Project config cannot
+            // set it -- this prevents a malicious repo from mounting over
+            // host paths via .workmux.yaml.
+            extra_mounts: {
+                if project.sandbox.extra_mounts.is_some() {
+                    tracing::warn!(
+                        "extra_mounts in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                self.sandbox.extra_mounts.clone()
+            },
+            // Security: agent_config_dir is global-only. Project config cannot
+            // set it -- this prevents a malicious repo from redirecting agent
+            // config mounts via .workmux.yaml.
+            agent_config_dir: {
+                if project.sandbox.agent_config_dir.is_some() {
+                    tracing::warn!(
+                        "agent_config_dir in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                self.sandbox.agent_config_dir.clone()
+            },
+            lima: LimaConfig::merge(self.sandbox.lima, project.sandbox.lima),
+            container: ContainerConfig::merge(self.sandbox.container, project.sandbox.container),
+            // Security: network is global-only. Project config cannot
+            // set it -- this prevents a malicious repo from weakening
+            // network restrictions via .workmux.yaml.
+            network: {
+                if project.sandbox.network.policy.is_some()
+                    || project.sandbox.network.allowed_domains.is_some()
+                {
+                    tracing::warn!(
+                        "network in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                self.sandbox.network.clone()
+            },
+            // Security: global-only, same as host_commands.
+            dangerously_allow_unsandboxed_host_exec: self
+                .sandbox
+                .dangerously_allow_unsandboxed_host_exec,
         };
 
         merged
@@ -1004,6 +1635,32 @@ impl Config {
 # Default: true
 # direnv:
 #   auto_allow: true
+
+#-------------------------------------------------------------------------------
+# Sandbox
+#-------------------------------------------------------------------------------
+
+# sandbox:
+#   enabled: false
+#   backend: lima
+#   # host_commands: ["just", "cargo", "npm"]
+#   # container:
+#   #   runtime: docker
+#   # lima:
+#   #   isolation: project
+#   #   cpus: 4
+#   #   memory: 4GiB
+#   #   # Custom provision script (runs once on VM creation, as user).
+#   #   # Use sudo for system commands.
+#   #   # provision: |
+#   #   #   sudo apt-get install -y ripgrep fd-find jq
+#   # Extra mount points (read-only by default).
+#   # Supports simple paths or detailed specs with guest_path and writable.
+#   # extra_mounts:
+#   #   - ~/my-notes
+#   #   - host_path: ~/data
+#   #     guest_path: /mnt/data
+#   #     writable: true
 "#;
 
         fs::write(&config_path, example_config)?;
@@ -1106,7 +1763,11 @@ pub fn is_agent_command(command_line: &str, agent_command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_agent_command, split_first_token};
+    use super::{
+        Config, ContainerConfig, ExtraMount, LimaConfig, NetworkConfig, NetworkPolicy,
+        SandboxConfig, SandboxRuntime, SandboxTarget, ToolchainMode, is_agent_command,
+        split_first_token, validate_domain,
+    };
 
     #[test]
     fn split_first_token_single_word() {
@@ -1255,5 +1916,997 @@ mod tests {
     fn direnv_config_default_matches_serde_defaults() {
         let config = DirenvConfig::default();
         assert!(config.auto_allow);
+    }
+
+    #[test]
+    fn sandbox_config_defaults() {
+        let config = SandboxConfig::default();
+        assert!(!config.is_enabled());
+        assert_eq!(config.target(), SandboxTarget::Agent);
+        assert!(config.env_passthrough().is_empty());
+    }
+
+    #[test]
+    fn sandbox_runtime_explicit_overrides_detect() {
+        let config = ContainerConfig {
+            runtime: Some(SandboxRuntime::Podman),
+        };
+        assert_eq!(config.runtime(), SandboxRuntime::Podman);
+
+        let config = ContainerConfig {
+            runtime: Some(SandboxRuntime::Docker),
+        };
+        assert_eq!(config.runtime(), SandboxRuntime::Docker);
+    }
+
+    #[test]
+    fn sandbox_runtime_detect_when_unset() {
+        let config = ContainerConfig { runtime: None };
+        // Should auto-detect from PATH; result depends on environment
+        // but should not panic
+        let _runtime = config.runtime();
+    }
+
+    #[test]
+    fn sandbox_config_merge() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                enabled: Some(true),
+                container: ContainerConfig {
+                    runtime: Some(SandboxRuntime::Docker),
+                },
+                image: Some("global-image".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                image: Some("project-image".to_string()),
+                container: ContainerConfig {
+                    runtime: Some(SandboxRuntime::Podman),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert!(merged.sandbox.is_enabled()); // from global
+        assert_eq!(merged.sandbox.resolved_image("claude"), "global-image"); // image is global-only
+        assert_eq!(merged.sandbox.runtime(), SandboxRuntime::Podman); // from project
+    }
+
+    #[test]
+    fn sandbox_provision_merge_override() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                lima: LimaConfig {
+                    provision: Some("echo global".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                lima: LimaConfig {
+                    provision: Some("echo project".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.lima.provision_script(), Some("echo project"));
+    }
+
+    #[test]
+    fn sandbox_provision_merge_fallback() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                lima: LimaConfig {
+                    provision: Some("echo global".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.lima.provision_script(), Some("echo global"));
+    }
+
+    #[test]
+    fn sandbox_provision_empty_disables_global() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                lima: LimaConfig {
+                    provision: Some("echo global".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                lima: LimaConfig {
+                    provision: Some("".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        // Empty string wins over global (project explicitly set it)
+        assert_eq!(merged.sandbox.lima.provision, Some("".to_string()));
+        // But provision_script() filters it out
+        assert_eq!(merged.sandbox.lima.provision_script(), None);
+    }
+
+    #[test]
+    fn sandbox_skip_default_provision_defaults_false() {
+        let config = LimaConfig::default();
+        assert!(!config.skip_default_provision());
+    }
+
+    #[test]
+    fn sandbox_skip_default_provision_merge() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                lima: LimaConfig {
+                    skip_default_provision: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+
+        let merged = global.merge(project);
+        assert!(merged.sandbox.lima.skip_default_provision());
+    }
+
+    #[test]
+    fn sandbox_skip_default_provision_project_overrides() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                lima: LimaConfig {
+                    skip_default_provision: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                lima: LimaConfig {
+                    skip_default_provision: Some(false),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert!(!merged.sandbox.lima.skip_default_provision());
+    }
+
+    #[test]
+    fn test_rpc_host_address_defaults() {
+        assert_eq!(
+            SandboxRuntime::Docker.rpc_host_address(),
+            "host.docker.internal"
+        );
+        assert_eq!(
+            SandboxRuntime::Podman.rpc_host_address(),
+            "host.containers.internal"
+        );
+    }
+
+    #[test]
+    fn test_resolved_rpc_host_uses_override() {
+        let config = SandboxConfig {
+            rpc_host: Some("custom.host.local".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.resolved_rpc_host(), "custom.host.local");
+    }
+
+    #[test]
+    fn test_resolved_rpc_host_falls_back_to_runtime() {
+        let config = SandboxConfig {
+            container: ContainerConfig {
+                runtime: Some(SandboxRuntime::Podman),
+            },
+            ..Default::default()
+        };
+        assert_eq!(config.resolved_rpc_host(), "host.containers.internal");
+    }
+
+    #[test]
+    fn sandbox_toolchain_defaults_to_auto() {
+        let config = SandboxConfig::default();
+        assert_eq!(config.toolchain(), ToolchainMode::Auto);
+    }
+
+    #[test]
+    fn sandbox_toolchain_merge_project_overrides() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                toolchain: Some(ToolchainMode::Auto),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                toolchain: Some(ToolchainMode::Off),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.toolchain(), ToolchainMode::Off);
+    }
+
+    #[test]
+    fn sandbox_toolchain_merge_fallback_to_global() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                toolchain: Some(ToolchainMode::Devbox),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.toolchain(), ToolchainMode::Devbox);
+    }
+
+    #[test]
+    fn test_sandbox_host_commands_default_empty() {
+        let config = SandboxConfig::default();
+        assert!(config.host_commands().is_empty());
+    }
+
+    #[test]
+    fn test_sandbox_host_commands_global_only() {
+        // Project config is ignored -- only global matters
+        let global = Config {
+            sandbox: SandboxConfig {
+                host_commands: Some(vec!["just".to_string(), "cargo".to_string()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                host_commands: Some(vec!["npm".to_string()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert_eq!(
+            merged.sandbox.host_commands(),
+            &["just".to_string(), "cargo".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_sandbox_host_commands_project_ignored_when_no_global() {
+        let global = Config::default(); // no host_commands
+        let project = Config {
+            sandbox: SandboxConfig {
+                host_commands: Some(vec!["rm".to_string()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert!(merged.sandbox.host_commands().is_empty());
+    }
+
+    #[test]
+    fn test_sandbox_host_commands_uses_global() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                host_commands: Some(vec!["just".to_string()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.host_commands(), &["just".to_string()]);
+    }
+
+    #[test]
+    fn test_allow_unsandboxed_host_exec_defaults_false() {
+        let config = SandboxConfig::default();
+        assert!(!config.allow_unsandboxed_host_exec());
+    }
+
+    #[test]
+    fn test_allow_unsandboxed_host_exec_global_only() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                dangerously_allow_unsandboxed_host_exec: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Project tries to set it -- should be ignored
+        let project = Config {
+            sandbox: SandboxConfig {
+                dangerously_allow_unsandboxed_host_exec: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert!(merged.sandbox.allow_unsandboxed_host_exec());
+    }
+
+    #[test]
+    fn test_allow_unsandboxed_host_exec_not_set_in_project() {
+        let global = Config::default();
+        let project = Config {
+            sandbox: SandboxConfig {
+                dangerously_allow_unsandboxed_host_exec: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        // Project value should be ignored
+        assert!(!merged.sandbox.allow_unsandboxed_host_exec());
+    }
+
+    #[test]
+    fn test_sandbox_rpc_host_global_only() {
+        // Project config is ignored -- only global matters
+        let global = Config {
+            sandbox: SandboxConfig {
+                rpc_host: Some("trusted.host".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                rpc_host: Some("evil.attacker.com".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.rpc_host, Some("trusted.host".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_rpc_host_project_ignored_when_no_global() {
+        let global = Config::default(); // no rpc_host
+        let project = Config {
+            sandbox: SandboxConfig {
+                rpc_host: Some("evil.attacker.com".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert!(merged.sandbox.rpc_host.is_none());
+    }
+
+    #[test]
+    fn test_sandbox_rpc_host_uses_global() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                rpc_host: Some("custom.host".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.rpc_host, Some("custom.host".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_image_global_only() {
+        // Project config is ignored -- only global matters
+        let global = Config {
+            sandbox: SandboxConfig {
+                image: Some("trusted:latest".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                image: Some("evil:latest".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.image, Some("trusted:latest".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_image_project_ignored_when_no_global() {
+        let global = Config::default();
+        let project = Config {
+            sandbox: SandboxConfig {
+                image: Some("evil:latest".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert!(merged.sandbox.image.is_none());
+    }
+
+    #[test]
+    fn test_sandbox_image_uses_global() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                image: Some("trusted:latest".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.image, Some("trusted:latest".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_env_passthrough_global_only() {
+        // Project config is ignored -- only global matters
+        let global = Config {
+            sandbox: SandboxConfig {
+                env_passthrough: Some(vec!["GITHUB_TOKEN".to_string()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                env_passthrough: Some(vec!["AWS_SECRET_ACCESS_KEY".to_string()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert_eq!(
+            merged.sandbox.env_passthrough,
+            Some(vec!["GITHUB_TOKEN".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_sandbox_env_passthrough_project_ignored_when_no_global() {
+        let global = Config::default();
+        let project = Config {
+            sandbox: SandboxConfig {
+                env_passthrough: Some(vec!["AWS_SECRET_ACCESS_KEY".to_string()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert!(merged.sandbox.env_passthrough.is_none());
+    }
+
+    #[test]
+    fn test_sandbox_env_passthrough_uses_global() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                env_passthrough: Some(vec!["GITHUB_TOKEN".to_string()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+
+        let merged = global.merge(project);
+        assert_eq!(
+            merged.sandbox.env_passthrough,
+            Some(vec!["GITHUB_TOKEN".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_extra_mount_parse_simple_string() {
+        let yaml = r#"extra_mounts: ["/tmp/notes"]"#;
+        let config: SandboxConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.extra_mounts().len(), 1);
+        let (host, guest, read_only) = config.extra_mounts()[0].resolve().unwrap();
+        assert_eq!(host, std::path::PathBuf::from("/tmp/notes"));
+        assert_eq!(guest, std::path::PathBuf::from("/tmp/notes"));
+        assert!(read_only);
+    }
+
+    #[test]
+    fn test_extra_mount_parse_spec() {
+        let yaml = r#"
+extra_mounts:
+  - host_path: /tmp/data
+    guest_path: /mnt/data
+    writable: true
+"#;
+        let config: SandboxConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.extra_mounts().len(), 1);
+        let (host, guest, read_only) = config.extra_mounts()[0].resolve().unwrap();
+        assert_eq!(host, std::path::PathBuf::from("/tmp/data"));
+        assert_eq!(guest, std::path::PathBuf::from("/mnt/data"));
+        assert!(!read_only);
+    }
+
+    #[test]
+    fn test_extra_mount_spec_defaults() {
+        let yaml = r#"
+extra_mounts:
+  - host_path: /tmp/data
+"#;
+        let config: SandboxConfig = serde_yaml::from_str(yaml).unwrap();
+        let (host, guest, read_only) = config.extra_mounts()[0].resolve().unwrap();
+        assert_eq!(host, std::path::PathBuf::from("/tmp/data"));
+        // guest defaults to host path
+        assert_eq!(guest, std::path::PathBuf::from("/tmp/data"));
+        // writable defaults to false (read_only = true)
+        assert!(read_only);
+    }
+
+    #[test]
+    fn test_extra_mount_tilde_expansion() {
+        let mount = ExtraMount::Path("~/notes".to_string());
+        let (host, guest, _) = mount.resolve().unwrap();
+        // Should expand ~ to home dir
+        assert!(!host.to_string_lossy().starts_with('~'));
+        assert!(host.to_string_lossy().ends_with("/notes"));
+        // Guest should mirror expanded host
+        assert_eq!(host, guest);
+    }
+
+    #[test]
+    fn test_extra_mount_mixed_list() {
+        let yaml = r#"
+extra_mounts:
+  - /tmp/notes
+  - host_path: /tmp/data
+    guest_path: /mnt/data
+    writable: true
+"#;
+        let config: SandboxConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.extra_mounts().len(), 2);
+
+        let (host0, _, ro0) = config.extra_mounts()[0].resolve().unwrap();
+        assert_eq!(host0, std::path::PathBuf::from("/tmp/notes"));
+        assert!(ro0);
+
+        let (host1, guest1, ro1) = config.extra_mounts()[1].resolve().unwrap();
+        assert_eq!(host1, std::path::PathBuf::from("/tmp/data"));
+        assert_eq!(guest1, std::path::PathBuf::from("/mnt/data"));
+        assert!(!ro1);
+    }
+
+    #[test]
+    fn test_extra_mounts_default_empty() {
+        let config = SandboxConfig::default();
+        assert!(config.extra_mounts().is_empty());
+    }
+
+    #[test]
+    fn test_extra_mounts_global_only() {
+        // Project config is ignored -- only global matters
+        let global = Config {
+            sandbox: SandboxConfig {
+                extra_mounts: Some(vec![ExtraMount::Path("/global/path".to_string())]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                extra_mounts: Some(vec![ExtraMount::Path("/project/path".to_string())]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.extra_mounts().len(), 1);
+        let (host, _, _) = merged.sandbox.extra_mounts()[0].resolve().unwrap();
+        assert_eq!(host, std::path::PathBuf::from("/global/path"));
+    }
+
+    #[test]
+    fn test_extra_mounts_project_ignored_when_no_global() {
+        let global = Config::default(); // no extra_mounts
+        let project = Config {
+            sandbox: SandboxConfig {
+                extra_mounts: Some(vec![ExtraMount::Path("/project/path".to_string())]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert!(merged.sandbox.extra_mounts().is_empty());
+    }
+
+    #[test]
+    fn test_extra_mounts_uses_global() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                extra_mounts: Some(vec![ExtraMount::Path("/global/path".to_string())]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.extra_mounts().len(), 1);
+        let (host, _, _) = merged.sandbox.extra_mounts()[0].resolve().unwrap();
+        assert_eq!(host, std::path::PathBuf::from("/global/path"));
+    }
+
+    #[test]
+    fn test_resolved_agent_config_dir_with_placeholder() {
+        let config = SandboxConfig {
+            agent_config_dir: Some("~/sandbox/{agent}".to_string()),
+            ..Default::default()
+        };
+        let dir = config.resolved_agent_config_dir("claude").unwrap();
+        let home = home::home_dir().unwrap();
+        assert_eq!(dir, home.join("sandbox/claude"));
+    }
+
+    #[test]
+    fn test_resolved_agent_config_dir_without_placeholder() {
+        let config = SandboxConfig {
+            agent_config_dir: Some("~/my-config".to_string()),
+            ..Default::default()
+        };
+        let dir = config.resolved_agent_config_dir("claude").unwrap();
+        let home = home::home_dir().unwrap();
+        assert_eq!(dir, home.join("my-config"));
+    }
+
+    #[test]
+    fn test_resolved_agent_config_dir_default() {
+        let config = SandboxConfig::default();
+        let dir = config.resolved_agent_config_dir("claude").unwrap();
+        let home = home::home_dir().unwrap();
+        assert_eq!(dir, home.join(".claude"));
+    }
+
+    #[test]
+    fn test_resolved_agent_config_dir_unknown_agent_default() {
+        let config = SandboxConfig::default();
+        assert!(config.resolved_agent_config_dir("unknown").is_none());
+    }
+
+    #[test]
+    fn test_resolved_agent_config_dir_unknown_agent_custom() {
+        let config = SandboxConfig {
+            agent_config_dir: Some("/custom/{agent}".to_string()),
+            ..Default::default()
+        };
+        // Custom dir always returns Some, even for unknown agents
+        let dir = config.resolved_agent_config_dir("unknown").unwrap();
+        assert_eq!(dir, std::path::PathBuf::from("/custom/unknown"));
+    }
+
+    #[test]
+    fn test_agent_config_dir_global_only() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                agent_config_dir: Some("~/global/{agent}".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                agent_config_dir: Some("~/project/{agent}".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = global.merge(project);
+        assert_eq!(
+            merged.sandbox.agent_config_dir,
+            Some("~/global/{agent}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_agent_config_dir_project_ignored_when_no_global() {
+        let global = Config::default();
+        let project = Config {
+            sandbox: SandboxConfig {
+                agent_config_dir: Some("~/project/{agent}".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = global.merge(project);
+        assert!(merged.sandbox.agent_config_dir.is_none());
+    }
+
+    #[test]
+    fn test_extra_mount_rejects_relative_host_path() {
+        let mount = ExtraMount::Path("relative/path".to_string());
+        let result = mount.resolve();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must be absolute"));
+    }
+
+    #[test]
+    fn test_extra_mount_rejects_relative_guest_path() {
+        let mount = ExtraMount::Spec {
+            host_path: "/tmp/data".to_string(),
+            guest_path: Some("relative/guest".to_string()),
+            writable: None,
+        };
+        let result = mount.resolve();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("guest_path must be absolute"));
+    }
+
+    #[test]
+    fn sandbox_nested_yaml_format() {
+        let yaml = r#"
+enabled: true
+backend: lima
+lima:
+  isolation: shared
+  cpus: 16
+  memory: 16GiB
+container:
+  runtime: podman
+"#;
+        let config: SandboxConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(config.is_enabled());
+        assert_eq!(config.lima.isolation(), super::IsolationLevel::Shared);
+        assert_eq!(config.lima.cpus(), 16);
+        assert_eq!(config.lima.memory(), "16GiB");
+        assert_eq!(config.container.runtime(), SandboxRuntime::Podman);
+    }
+
+    #[test]
+    fn sandbox_lima_config_merge() {
+        let global = LimaConfig {
+            isolation: Some(super::IsolationLevel::Shared),
+            cpus: Some(4),
+            memory: Some("4GiB".to_string()),
+            ..Default::default()
+        };
+        let project = LimaConfig {
+            cpus: Some(8),
+            provision: Some("echo project".to_string()),
+            ..Default::default()
+        };
+
+        let merged = LimaConfig::merge(global, project);
+        // Project overrides
+        assert_eq!(merged.cpus(), 8);
+        assert_eq!(merged.provision_script(), Some("echo project"));
+        // Global fallback
+        assert_eq!(merged.isolation(), super::IsolationLevel::Shared);
+        assert_eq!(merged.memory(), "4GiB");
+    }
+
+    #[test]
+    fn sandbox_container_config_merge() {
+        let global = ContainerConfig {
+            runtime: Some(SandboxRuntime::Docker),
+        };
+        let project = ContainerConfig {
+            runtime: Some(SandboxRuntime::Podman),
+        };
+
+        let merged = ContainerConfig::merge(global, project);
+        assert_eq!(merged.runtime(), SandboxRuntime::Podman);
+    }
+
+    // --- Network config tests ---
+
+    #[test]
+    fn network_policy_defaults_to_allow() {
+        let config = SandboxConfig::default();
+        assert_eq!(config.network.policy(), NetworkPolicy::Allow);
+        assert!(!config.network_policy_is_deny());
+    }
+
+    #[test]
+    fn network_policy_deny() {
+        let config = SandboxConfig {
+            network: NetworkConfig {
+                policy: Some(NetworkPolicy::Deny),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(config.network.policy(), NetworkPolicy::Deny);
+        assert!(config.network_policy_is_deny());
+    }
+
+    #[test]
+    fn network_allowed_domains_default_empty() {
+        let config = NetworkConfig::default();
+        assert!(config.allowed_domains().is_empty());
+    }
+
+    #[test]
+    fn network_config_global_only() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                network: NetworkConfig {
+                    policy: Some(NetworkPolicy::Deny),
+                    allowed_domains: Some(vec!["api.anthropic.com".to_string()]),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                network: NetworkConfig {
+                    policy: Some(NetworkPolicy::Allow),
+                    allowed_domains: Some(vec!["evil.com".to_string()]),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        // Global value should win
+        assert_eq!(merged.sandbox.network.policy(), NetworkPolicy::Deny);
+        assert_eq!(
+            merged.sandbox.network.allowed_domains(),
+            &["api.anthropic.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn network_config_project_ignored_when_no_global() {
+        let global = Config::default();
+        let project = Config {
+            sandbox: SandboxConfig {
+                network: NetworkConfig {
+                    policy: Some(NetworkPolicy::Deny),
+                    allowed_domains: Some(vec!["evil.com".to_string()]),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.network.policy(), NetworkPolicy::Allow);
+        assert!(merged.sandbox.network.allowed_domains().is_empty());
+    }
+
+    #[test]
+    fn network_config_uses_global() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                network: NetworkConfig {
+                    policy: Some(NetworkPolicy::Deny),
+                    allowed_domains: Some(vec!["github.com".to_string()]),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.network.policy(), NetworkPolicy::Deny);
+        assert_eq!(
+            merged.sandbox.network.allowed_domains(),
+            &["github.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn validate_domain_rejects_ip_literal() {
+        assert!(validate_domain("192.168.1.1").is_err());
+        assert!(validate_domain("127.0.0.1").is_err());
+        assert!(validate_domain("::1").is_err());
+    }
+
+    #[test]
+    fn validate_domain_rejects_trailing_dot() {
+        assert!(validate_domain("example.com.").is_err());
+    }
+
+    #[test]
+    fn validate_domain_rejects_malformed_wildcard() {
+        assert!(validate_domain("foo.*.com").is_err());
+        assert!(validate_domain("*foo.com").is_err());
+    }
+
+    #[test]
+    fn validate_domain_rejects_empty() {
+        assert!(validate_domain("").is_err());
+    }
+
+    #[test]
+    fn validate_domain_accepts_valid() {
+        assert!(validate_domain("example.com").is_ok());
+        assert!(validate_domain("api.anthropic.com").is_ok());
+        assert!(validate_domain("*.googleapis.com").is_ok());
+        assert!(validate_domain("*.github.com").is_ok());
+    }
+
+    #[test]
+    fn network_config_validate_catches_bad_domains() {
+        let config = NetworkConfig {
+            policy: Some(NetworkPolicy::Deny),
+            allowed_domains: Some(vec!["good.com".to_string(), "192.168.1.1".to_string()]),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn network_config_validate_passes_good_domains() {
+        let config = NetworkConfig {
+            policy: Some(NetworkPolicy::Deny),
+            allowed_domains: Some(vec![
+                "api.anthropic.com".to_string(),
+                "*.github.com".to_string(),
+                "registry.npmjs.org".to_string(),
+            ]),
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn network_config_yaml_roundtrip() {
+        let yaml = r#"
+network:
+  policy: deny
+  allowed_domains:
+    - api.anthropic.com
+    - "*.github.com"
+"#;
+        let config: SandboxConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.network.policy(), NetworkPolicy::Deny);
+        assert_eq!(config.network.allowed_domains().len(), 2);
     }
 }

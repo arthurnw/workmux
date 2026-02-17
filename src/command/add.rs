@@ -9,7 +9,7 @@ use crate::workflow::SetupOptions;
 use crate::workflow::pr::detect_remote_branch;
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt, parse_prompt_with_frontmatter};
 use crate::{config, git, workflow};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
@@ -114,8 +114,27 @@ pub fn run(
     multi: MultiArgs,
     wait: bool,
 ) -> Result<()> {
+    // Inside a sandbox guest, route through RPC to the host supervisor
+    if crate::sandbox::guest::is_sandbox_guest() {
+        return run_add_via_rpc(
+            branch_name,
+            auto_name,
+            &prompt_args,
+            &setup,
+            &rescue,
+            &multi,
+            base,
+            pr,
+            name.as_deref(),
+            wait,
+        );
+    }
+
     // Ensure preconditions are met (git repo and tmux session)
     check_preconditions()?;
+
+    // Extract sandbox override before consuming setup flags
+    let sandbox_override = setup.sandbox;
 
     // Construct setup options from flags
     let mut options = SetupOptions::new(!setup.no_hooks, !setup.no_file_ops, !setup.no_pane_cmds);
@@ -225,8 +244,11 @@ pub fn run(
 
     // Handle rescue flow early if requested
     if rescue.with_changes {
-        let (rescue_config, rescue_location) =
+        let (mut rescue_config, rescue_location) =
             config::Config::load_with_location(multi.agent.first().map(|s| s.as_str()))?;
+        if sandbox_override {
+            rescue_config.sandbox.enabled = Some(true);
+        }
         let mux = create_backend(detect_backend());
         let rescue_context = workflow::WorkflowContext::new(rescue_config, mux, rescue_location)?;
         // Derive handle for rescue flow (uses config for naming strategy/prefix)
@@ -345,6 +367,7 @@ pub fn run(
         wait,
         deferred_auto_name,
         max_concurrent: multi.max_concurrent,
+        sandbox_override,
     };
     plan.execute()
 }
@@ -470,6 +493,7 @@ struct CreationPlan<'a> {
     wait: bool,
     deferred_auto_name: bool,
     max_concurrent: Option<u32>,
+    sandbox_override: bool,
 }
 
 impl<'a> CreationPlan<'a> {
@@ -507,8 +531,11 @@ impl<'a> CreationPlan<'a> {
                 }
             }
             // Load config for this specific agent to ensure correct agent resolution
-            let (config, config_location) =
+            let (mut config, config_location) =
                 config::Config::load_with_location(spec.agent.as_deref())?;
+            if self.sandbox_override {
+                config.sandbox.enabled = Some(true);
+            }
 
             // Render prompt first (needed for deferred auto-name)
             let rendered_prompt = if let Some(doc) = self.prompt_doc {
@@ -598,5 +625,98 @@ impl<'a> CreationPlan<'a> {
         }
 
         Ok(())
+    }
+}
+
+/// Route `workmux add` through SpawnAgent RPC when running inside a sandbox.
+///
+/// Only a subset of `add` flags are supported over RPC. Unsupported flags
+/// are explicitly rejected with a clear error rather than silently ignored.
+#[allow(clippy::too_many_arguments)]
+fn run_add_via_rpc(
+    branch_name: Option<&str>,
+    auto_name: bool,
+    prompt_args: &PromptArgs,
+    setup: &SetupFlags,
+    rescue: &RescueArgs,
+    multi: &MultiArgs,
+    base: Option<&str>,
+    pr: Option<u32>,
+    name: Option<&str>,
+    wait: bool,
+) -> Result<()> {
+    use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
+    use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
+
+    // --- Validate: reject unsupported flags explicitly ---
+    if base.is_some() {
+        bail!("--base is not supported from inside a sandbox");
+    }
+    if pr.is_some() {
+        bail!("--pr is not supported from inside a sandbox");
+    }
+    if name.is_some() {
+        bail!("--name is not supported from inside a sandbox");
+    }
+    if wait {
+        bail!("--wait is not supported from inside a sandbox");
+    }
+    if rescue.with_changes {
+        bail!("--with-changes is not supported from inside a sandbox");
+    }
+    if !multi.agent.is_empty() {
+        bail!("--agent is not supported from inside a sandbox (uses host config)");
+    }
+    if multi.count.is_some() {
+        bail!(
+            "--count is not supported from inside a sandbox. Call workmux add multiple times instead."
+        );
+    }
+    if multi.foreach.is_some() {
+        bail!("--foreach is not supported from inside a sandbox");
+    }
+
+    // --- Resolve prompt via existing loader (handles -p, -P, -e) ---
+    let prompt_content = load_prompt(&PromptLoadArgs {
+        prompt_editor: prompt_args.prompt_editor,
+        prompt_inline: prompt_args.prompt.as_deref(),
+        prompt_file: prompt_args.prompt_file.as_ref(),
+    })?;
+    let prompt_text = match prompt_content {
+        Some(Prompt::Inline(text)) => Some(text),
+        Some(Prompt::FromFile(path)) => Some(
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read prompt file: {}", path.display()))?,
+        ),
+        None => None,
+    };
+
+    // --- Build RPC request ---
+    let rpc_branch = if auto_name {
+        None
+    } else {
+        branch_name.map(|s| s.to_string())
+    };
+
+    let mut client = RpcClient::from_env().context(
+        "Failed to connect to host RPC server. Is this running inside a workmux sandbox?",
+    )?;
+
+    let resp = client.call(&RpcRequest::SpawnAgent {
+        prompt: prompt_text.unwrap_or_default(),
+        branch_name: rpc_branch.clone(),
+        background: if setup.background { Some(true) } else { None },
+    })?;
+
+    match resp {
+        RpcResponse::Ok => {
+            let display_name = rpc_branch.as_deref().unwrap_or("(auto-named)");
+            println!("✓ Spawned agent: {}", display_name);
+            Ok(())
+        }
+        RpcResponse::Error { message } => {
+            bail!("Host failed to spawn agent: {}", message)
+        }
+        other => bail!("Unexpected RPC response: {:?}", other),
     }
 }

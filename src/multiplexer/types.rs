@@ -72,6 +72,10 @@ pub struct PaneSetupOptions<'a> {
     pub prompt_file_path: Option<&'a std::path::Path>,
     /// Session ID to resume (e.g., Claude --resume <uuid>)
     pub resume_session_id: Option<&'a str>,
+    /// Root of the worktree (for sandbox mounting). May differ from working_dir in monorepos.
+    pub worktree_root: Option<&'a std::path::Path>,
+    /// Pre-booted Lima VM name (if sandbox backend is Lima and VM was booted before window creation)
+    pub lima_vm_name: Option<&'a str>,
 }
 
 /// Backend type for multiplexer selection
@@ -82,6 +86,8 @@ pub enum BackendType {
     Tmux,
     /// WezTerm backend
     WezTerm,
+    /// Kitty backend
+    Kitty,
 }
 
 impl std::fmt::Display for BackendType {
@@ -89,6 +95,7 @@ impl std::fmt::Display for BackendType {
         match self {
             BackendType::Tmux => write!(f, "tmux"),
             BackendType::WezTerm => write!(f, "wezterm"),
+            BackendType::Kitty => write!(f, "kitty"),
         }
     }
 }
@@ -100,6 +107,7 @@ impl std::str::FromStr for BackendType {
         match s.to_lowercase().as_str() {
             "tmux" => Ok(BackendType::Tmux),
             "wezterm" => Ok(BackendType::WezTerm),
+            "kitty" => Ok(BackendType::Kitty),
             other => Err(format!("unknown backend: {}", other)),
         }
     }

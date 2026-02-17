@@ -90,13 +90,29 @@ export default defineConfig({
         ],
       },
       {
+        text: "Sandbox",
+        items: [
+          { text: "Overview", link: "/guide/sandbox/" },
+          { text: "Container backend", link: "/guide/sandbox/container" },
+          { text: "Lima VM backend", link: "/guide/sandbox/lima" },
+          { text: "Shared features", link: "/guide/sandbox/features" },
+          { text: "Alternatives", link: "/guide/sandbox/alternatives" },
+        ],
+      },
+      {
+        text: "Alternative backends",
+        items: [
+          { text: "kitty", link: "/guide/kitty" },
+          { text: "WezTerm", link: "/guide/wezterm" },
+        ],
+      },
+      {
         text: "Guides",
         items: [
           { text: "direnv", link: "/guide/direnv" },
           { text: "Monorepos", link: "/guide/monorepos" },
           { text: "Git worktree caveats", link: "/guide/git-worktree-caveats" },
           { text: "Nix", link: "/guide/nix" },
-          { text: "WezTerm", link: "/guide/wezterm" },
         ],
       },
       {
@@ -112,6 +128,7 @@ export default defineConfig({
           { text: "dashboard", link: "/reference/commands/dashboard" },
           { text: "init", link: "/reference/commands/init" },
           { text: "claude prune", link: "/reference/commands/claude" },
+          { text: "sandbox", link: "/reference/commands/sandbox" },
           { text: "completions", link: "/reference/commands/completions" },
           { text: "docs", link: "/reference/commands/docs" },
         ],

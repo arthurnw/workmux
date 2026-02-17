@@ -14,8 +14,25 @@ pub fn run(
     mut auto_message: bool,
     keep: bool,
     no_verify: bool,
+    no_hooks: bool,
     notification: bool,
 ) -> Result<()> {
+    // Inside a sandbox guest, route through RPC to the host supervisor
+    if crate::sandbox::guest::is_sandbox_guest() {
+        let name_to_merge = super::resolve_name(name)?;
+        return run_via_rpc(
+            &name_to_merge,
+            into_branch,
+            rebase,
+            squash,
+            ignore_uncommitted,
+            keep,
+            no_verify,
+            no_hooks,
+            notification,
+        );
+    }
+
     let config = config::Config::load(None)?;
 
     // Apply default strategy from config if no CLI flags are provided
@@ -49,13 +66,15 @@ pub fn run(
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, None)?;
 
-    // Announce pre-merge hooks if any (unless --no-verify is passed)
-    if !no_verify {
+    let skip_hooks = no_verify || no_hooks;
+
+    // Announce pre-merge hooks if any (unless hooks are skipped)
+    if !skip_hooks {
         super::announce_hooks(&context.config, None, super::HookPhase::PreMerge);
     }
 
     // Only announce pre-remove hooks if we're actually going to run cleanup
-    if !keep {
+    if !keep && !no_hooks {
         super::announce_hooks(&context.config, None, super::HookPhase::PreRemove);
     }
 
@@ -68,6 +87,7 @@ pub fn run(
         auto_message,
         keep,
         no_verify,
+        no_hooks,
         notification,
         &context,
     )
@@ -93,4 +113,50 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// Run merge via RPC when inside a sandbox guest.
+#[allow(clippy::too_many_arguments)]
+fn run_via_rpc(
+    name: &str,
+    into: Option<&str>,
+    rebase: bool,
+    squash: bool,
+    ignore_uncommitted: bool,
+    keep: bool,
+    no_verify: bool,
+    no_hooks: bool,
+    notification: bool,
+) -> Result<()> {
+    use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
+    use std::io::Write;
+
+    let mut client = RpcClient::from_env()?;
+    client.send(&RpcRequest::Merge {
+        name: name.to_string(),
+        into: into.map(|s| s.to_string()),
+        rebase,
+        squash,
+        ignore_uncommitted,
+        keep,
+        no_verify,
+        no_hooks,
+        notification,
+    })?;
+
+    // Read streaming responses until we get a terminal Ok or Error
+    loop {
+        let response = client.recv()?;
+        match response {
+            RpcResponse::Output { message } => {
+                print!("{}", message);
+                std::io::stdout().flush().ok();
+            }
+            RpcResponse::Ok => return Ok(()),
+            RpcResponse::Error { message } => {
+                anyhow::bail!("{}", message);
+            }
+            _ => {}
+        }
+    }
 }

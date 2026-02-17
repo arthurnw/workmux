@@ -37,6 +37,14 @@ pub trait AgentProfile: Send + Sync {
         None
     }
 
+    /// CLI flag to skip interactive permission prompts when running in a sandbox.
+    ///
+    /// Returns `None` for agents that don't support this, or a flag string
+    /// like `--dangerously-skip-permissions` for agents that do.
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Format the prompt injection argument for this agent.
     ///
     /// Returns the CLI fragment to append (e.g., `-- "$(cat PROMPT.md)"`).
@@ -65,6 +73,10 @@ impl AgentProfile for ClaudeProfile {
     fn resume_argument(&self, session_id: &str) -> Option<String> {
         Some(format!("--resume {}", session_id))
     }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--dangerously-skip-permissions")
+    }
 }
 
 pub struct GeminiProfile;
@@ -72,6 +84,10 @@ pub struct GeminiProfile;
 impl AgentProfile for GeminiProfile {
     fn name(&self) -> &'static str {
         "gemini"
+    }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--yolo")
     }
 
     fn prompt_argument(&self, prompt_path: &str) -> String {
@@ -101,7 +117,10 @@ impl AgentProfile for CodexProfile {
     fn name(&self) -> &'static str {
         "codex"
     }
-    // Uses default -- separator
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--yolo")
+    }
 }
 
 pub struct DefaultProfile;
@@ -178,6 +197,10 @@ mod tests {
             profile.resume_argument("abc-123"),
             Some("--resume abc-123".to_string())
         );
+        assert_eq!(
+            profile.skip_permissions_flag(),
+            Some("--dangerously-skip-permissions")
+        );
     }
 
     #[test]
@@ -190,6 +213,7 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-i \"$(cat PROMPT.md)\""
         );
+        assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
     }
 
     #[test]
@@ -214,6 +238,7 @@ mod tests {
             profile.prompt_argument("PROMPT.md"),
             "-- \"$(cat PROMPT.md)\""
         );
+        assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
     }
 
     #[test]

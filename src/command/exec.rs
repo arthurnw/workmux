@@ -1,4 +1,4 @@
-//! Hidden `__exec` subcommand for running commands in worktree panes.
+//! Hidden `_exec` subcommand for running commands in worktree panes.
 //!
 //! This is invoked by `workmux run` in a split pane to execute the command
 //! while capturing output to files.
@@ -54,7 +54,7 @@ fn try_run(run_dir: &Path) -> Result<()> {
         .context("Failed to open stderr file")?;
 
     // Spawn the command
-    let mut child = Command::new("sh")
+    let mut child = Command::new("bash")
         .arg("-c")
         .arg(&spec.command)
         .current_dir(&spec.worktree_path)

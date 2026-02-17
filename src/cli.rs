@@ -279,6 +279,10 @@ enum Commands {
         #[arg(short = 'n', long)]
         no_verify: bool,
 
+        /// Skip running all hooks (pre-merge and pre-remove)
+        #[arg(long)]
+        no_hooks: bool,
+
         /// Show a system notification on successful merge
         #[arg(long)]
         notification: bool,
@@ -419,7 +423,7 @@ enum Commands {
     /// Show the changelog (what's new in each version)
     Changelog,
 
-    /// Show a TUI dashboard or manage dashboard windows
+    /// Show a TUI dashboard of all active workmux agents across all sessions
     Dashboard {
         /// Preview pane size as percentage (10-90). Larger = more preview, less table.
         #[arg(long, short = 'P', value_parser = clap::value_parser!(u8).range(10..=90))]
@@ -450,11 +454,17 @@ enum Commands {
         all: bool,
     },
 
+    /// Manage global configuration
+    Config(command::config::ConfigArgs),
+
     /// Claude Code integration commands
     Claude {
         #[command(subcommand)]
         command: ClaudeCommands,
     },
+
+    /// Manage sandbox settings
+    Sandbox(command::sandbox::SandboxArgs),
 
     /// Set agent status for the current tmux window (used by hooks)
     #[command(hide = true)]
@@ -472,7 +482,7 @@ enum Commands {
     },
 
     /// Execute a run spec (internal use)
-    #[command(hide = true, name = "__exec")]
+    #[command(hide = true, name = "_exec")]
     Exec {
         /// Absolute path to run directory
         #[arg(long)]
@@ -486,6 +496,14 @@ enum Commands {
     /// Switch to the last visited agent (toggle between two)
     #[command(hide = true, name = "last-agent")]
     LastAgent,
+
+    /// Execute a command on the host (used by guest shims)
+    #[command(hide = true, name = "host-exec")]
+    HostExec {
+        /// Command name and arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
 
     /// Generate shell completions
     Completions {
@@ -577,12 +595,18 @@ pub fn run() -> Result<()> {
 
     // Always initialize nerdfont setting for prefix consistency across commands.
     // Only prompt interactively for commands that display icons.
-    let cfg = config::Config::load(None).unwrap_or_default();
+    // If config fails to load, skip the nerdfont wizard -- it will be shown on
+    // the next successful run and the real error surfaces when the command loads
+    // config with `?`.
+    let (cfg, config_ok) = match config::Config::load(None) {
+        Ok(cfg) => (cfg, true),
+        Err(_) => (config::Config::default(), false),
+    };
     let has_pua = nerdfont::config_has_pua(&cfg);
     let nerdfont_enabled = if cfg.nerdfont.is_some() || has_pua {
         // Already configured or PUA detected
         cfg.nerdfont.unwrap_or(has_pua)
-    } else if should_prompt_nerdfont(&cli.command) {
+    } else if config_ok && should_prompt_nerdfont(&cli.command) {
         // Prompt user (returns None in non-interactive mode)
         nerdfont::check_and_prompt(&cfg)?.unwrap_or(false)
     } else {
@@ -631,6 +655,7 @@ pub fn run() -> Result<()> {
             auto_message,
             keep,
             no_verify,
+            no_hooks,
             notification,
         } => command::merge::run(
             name.as_deref(),
@@ -641,6 +666,7 @@ pub fn run() -> Result<()> {
             auto_message,
             keep,
             no_verify,
+            no_hooks,
             notification,
         ),
         Commands::Remove {
@@ -698,13 +724,22 @@ pub fn run() -> Result<()> {
             }
         },
         Commands::Restore { dry_run, all } => command::restore::run(dry_run, all),
+        Commands::Config(args) => command::config::run(args),
         Commands::Claude { command } => match command {
             ClaudeCommands::Prune => prune_claude_config(),
         },
+        Commands::Sandbox(args) => command::sandbox::run(args),
         Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::SetBase { base } => command::set_base::run(&base),
         Commands::LastDone => command::last_done::run(),
         Commands::LastAgent => command::last_agent::run(),
+        Commands::HostExec { args } => {
+            let (command, cmd_args) = args
+                .split_first()
+                .ok_or_else(|| anyhow::anyhow!("host-exec requires a command name"))?;
+            let code = command::host_exec::run(command, cmd_args)?;
+            std::process::exit(code);
+        }
         Commands::Completions { shell } => {
             generate_completions(shell);
             Ok(())

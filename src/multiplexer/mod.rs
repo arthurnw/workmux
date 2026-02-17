@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod handshake;
+pub mod kitty;
 pub mod tmux;
 pub mod types;
 pub mod util;
@@ -59,6 +60,14 @@ pub trait Multiplexer: Send + Sync {
     /// Run a deferred script in the background (for cleanup operations).
     /// For tmux, this uses `run-shell`. For other backends, may use different mechanisms.
     fn run_deferred_script(&self, script: &str) -> Result<()>;
+
+    /// Generate a shell command string to select/focus a window by full name.
+    /// Used in deferred scripts that run asynchronously via `run_deferred_script`.
+    fn shell_select_window_cmd(&self, full_name: &str) -> Result<String>;
+
+    /// Generate a shell command string to close/kill a window by full name.
+    /// Used in deferred scripts that run asynchronously via `run_deferred_script`.
+    fn shell_kill_window_cmd(&self, full_name: &str) -> Result<String>;
 
     /// Select (focus) a window by prefix and name
     fn select_window(&self, prefix: &str, name: &str) -> Result<()>;
@@ -225,7 +234,83 @@ pub trait Multiplexer: Send + Sync {
                 };
 
                 handshake.wait()?;
-                self.send_keys(&spawned_id, &resolved.command)?;
+
+                // Detect if this is an agent pane for sandbox targeting
+                let is_agent_pane = pane_config.command.as_deref().is_some_and(|cmd| {
+                    cmd == "<agent>"
+                        || effective_agent.is_some_and(|a| crate::config::is_agent_command(cmd, a))
+                });
+
+                // Apply sandbox wrapping if enabled for this pane type
+                let final_command = if config.sandbox.is_enabled() {
+                    let should_wrap = match config.sandbox.target() {
+                        crate::config::SandboxTarget::All => true,
+                        crate::config::SandboxTarget::Agent => is_agent_pane,
+                    };
+                    if should_wrap {
+                        // Use worktree_root for mounting, working_dir for cwd
+                        let wt_root = options.worktree_root.unwrap_or(working_dir);
+
+                        // Inject skip-permissions flag for agent panes only
+                        // (sandbox provides the security boundary, so permission
+                        // prompts are unnecessary and break autonomous workflow)
+                        let command_to_wrap = if is_agent_pane {
+                            let profile =
+                                crate::multiplexer::agent::resolve_profile(effective_agent);
+                            if let Some(flag) = profile.skip_permissions_flag() {
+                                util::inject_skip_permissions_flag(&resolved.command, flag)
+                            } else {
+                                resolved.command.clone()
+                            }
+                        } else {
+                            resolved.command.clone()
+                        };
+
+                        // Choose backend based on config
+                        let wrap_result = match config.sandbox.backend() {
+                            crate::config::SandboxBackend::Container => {
+                                crate::sandbox::wrap_for_container(
+                                    &command_to_wrap,
+                                    &config.sandbox,
+                                    wt_root,
+                                    working_dir,
+                                )
+                            }
+                            crate::config::SandboxBackend::Lima => {
+                                let vm_name = options.lima_vm_name.ok_or_else(|| {
+                                    anyhow!(
+                                        "Lima VM name missing despite sandbox wrap request. \
+                                         This is a bug in workmux."
+                                    )
+                                })?;
+                                crate::sandbox::wrap_for_lima(
+                                    &command_to_wrap,
+                                    config,
+                                    vm_name,
+                                    working_dir,
+                                )
+                            }
+                        };
+
+                        // Fail closed: if sandbox is enabled but wrapping fails, don't fall back to unsandboxed
+                        match wrap_result {
+                            Ok(wrapped) => wrapped,
+                            Err(e) => {
+                                return Err(anyhow!(
+                                    "Sandbox is enabled but failed to wrap command: {}. \
+                                     To disable sandbox, set 'sandbox.enabled: false' in config.",
+                                    e
+                                ));
+                            }
+                        }
+                    } else {
+                        resolved.command.clone()
+                    }
+                } else {
+                    resolved.command.clone()
+                };
+
+                self.send_keys(&spawned_id, &final_command)?;
 
                 // Track agent panes
                 if let Some(agent_cmd) = effective_agent {
@@ -363,21 +448,50 @@ pub trait Multiplexer: Send + Sync {
 
 /// Detect which backend to use based on environment.
 ///
-/// Auto-detects from multiplexer environment variables:
-/// - `$WEZTERM_PANE` set → WezTerm
-/// - `$TMUX` set → tmux
-/// - Neither → defaults to tmux (for backward compatibility)
+/// Checks `$WORKMUX_BACKEND` first for an explicit override, then auto-detects
+/// from multiplexer environment variables. Session-specific variables (set only
+/// when inside the multiplexer) are checked before ambient variables (inherited
+/// from the parent terminal):
+///
+/// 1. `$WORKMUX_BACKEND` set → use that backend
+/// 2. `$TMUX` set → tmux
+/// 3. `$WEZTERM_PANE` set → WezTerm
+/// 4. `$KITTY_WINDOW_ID` set → Kitty
+/// 5. None → defaults to tmux (for backward compatibility)
+///
+/// This ordering ensures that running tmux inside kitty (or wezterm) correctly
+/// selects the innermost multiplexer.
 pub fn detect_backend() -> BackendType {
-    // Auto-detect from environment
-    if std::env::var("WEZTERM_PANE").is_ok() {
-        return BackendType::WezTerm;
+    if let Ok(val) = std::env::var("WORKMUX_BACKEND") {
+        match val.parse() {
+            Ok(bt) => return bt,
+            Err(_) => {
+                eprintln!("workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty");
+            }
+        }
     }
 
-    if std::env::var("TMUX").is_ok() {
+    resolve_backend(
+        std::env::var("TMUX").is_ok(),
+        std::env::var("WEZTERM_PANE").is_ok(),
+        std::env::var("KITTY_WINDOW_ID").is_ok(),
+    )
+}
+
+/// Pure auto-detection logic, separated for testability.
+fn resolve_backend(tmux: bool, wezterm: bool, kitty: bool) -> BackendType {
+    if tmux {
         return BackendType::Tmux;
     }
 
-    // Default to tmux for backward compatibility
+    if wezterm {
+        return BackendType::WezTerm;
+    }
+
+    if kitty {
+        return BackendType::Kitty;
+    }
+
     BackendType::Tmux
 }
 
@@ -386,5 +500,51 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
     match backend_type {
         BackendType::Tmux => Arc::new(TmuxBackend::new()),
         BackendType::WezTerm => Arc::new(wezterm::WezTermBackend::new()),
+        BackendType::Kitty => Arc::new(kitty::KittyBackend::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_env_defaults_to_tmux() {
+        assert_eq!(resolve_backend(false, false, false), BackendType::Tmux);
+    }
+
+    #[test]
+    fn tmux_only() {
+        assert_eq!(resolve_backend(true, false, false), BackendType::Tmux);
+    }
+
+    #[test]
+    fn wezterm_only() {
+        assert_eq!(resolve_backend(false, true, false), BackendType::WezTerm);
+    }
+
+    #[test]
+    fn kitty_only() {
+        assert_eq!(resolve_backend(false, false, true), BackendType::Kitty);
+    }
+
+    #[test]
+    fn tmux_inside_kitty() {
+        assert_eq!(resolve_backend(true, false, true), BackendType::Tmux);
+    }
+
+    #[test]
+    fn tmux_inside_wezterm() {
+        assert_eq!(resolve_backend(true, true, false), BackendType::Tmux);
+    }
+
+    #[test]
+    fn wezterm_inside_kitty() {
+        assert_eq!(resolve_backend(false, true, true), BackendType::WezTerm);
+    }
+
+    #[test]
+    fn all_env_vars_set() {
+        assert_eq!(resolve_backend(true, true, true), BackendType::Tmux);
     }
 }

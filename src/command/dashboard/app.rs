@@ -19,8 +19,6 @@ use super::ui::theme::ThemePalette;
 
 const PR_FETCH_INTERVAL: Duration = Duration::from_secs(30);
 
-use super::monitor::AgentMonitor;
-
 use super::agent;
 use super::diff::DiffView;
 use super::settings::{
@@ -99,8 +97,6 @@ pub struct App {
     pub show_help: bool,
     /// Preview pane size as percentage (1-90). Higher = larger preview.
     pub preview_size: u8,
-    /// Monitors agents for stalls and interrupts
-    agent_monitor: AgentMonitor,
     /// Last jumped-to pane_id for quick toggle (cached from settings)
     last_pane_id: Option<String>,
     /// Color palette based on the configured theme
@@ -168,7 +164,6 @@ impl App {
             hide_stale,
             show_help: false,
             preview_size,
-            agent_monitor: AgentMonitor::new(),
             last_pane_id,
             palette,
         };
@@ -192,12 +187,6 @@ impl App {
         self.agents = StateStore::new()
             .and_then(|store| store.load_reconciled_agents(self.mux.as_ref()))
             .unwrap_or_default();
-
-        // Detect and handle stalled agents
-        let working_icon = self.config.status_icons.working();
-        self.agents =
-            self.agent_monitor
-                .process_stalls(self.agents.clone(), working_icon, self.mux.as_ref());
 
         self.sort_agents();
 
@@ -351,8 +340,7 @@ impl App {
             return;
         }
 
-        // Collect repo roots that have at least one pushed feature branch
-        // (skip repos where no branches have upstreams, excluding main/master)
+        // Collect repo roots that have at least one non-main feature branch
         let repo_roots: std::collections::HashSet<PathBuf> = self
             .agents
             .iter()
@@ -364,10 +352,7 @@ impl App {
                     return false;
                 };
                 // Skip main/master - they don't need PR status
-                if branch == "main" || branch == "master" {
-                    return false;
-                }
-                status.has_upstream
+                branch != "main" && branch != "master"
             })
             .filter_map(|agent| self.repo_roots.get(&agent.path).cloned())
             .collect();
@@ -425,12 +410,15 @@ impl App {
             .and_then(|pane_id| self.mux.capture_pane(pane_id, PREVIEW_LINES));
     }
 
-    /// Parse pane_id (e.g., "%0", "%10") to a number for proper ordering
-    fn parse_pane_id(pane_id: &str) -> u32 {
+    /// Parse pane_id to a number for proper ordering.
+    /// Handles tmux format (%0, %10) and numeric formats (WezTerm, kitty).
+    /// Uses u64 since kitty pane IDs can exceed u32 range.
+    fn parse_pane_id(pane_id: &str) -> u64 {
         pane_id
             .strip_prefix('%')
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(u32::MAX)
+            .unwrap_or(pane_id)
+            .parse()
+            .unwrap_or(u64::MAX)
     }
 
     /// Sort agents based on the current sort mode

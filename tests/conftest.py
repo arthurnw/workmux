@@ -162,6 +162,7 @@ class MuxEnvironment(ABC):
 
     def __init__(self, tmp_path: Path):
         self.tmp_path = tmp_path
+        self._scripts_dir: Optional[Path] = None  # Lazily created by get_scripts_dir()
 
         # Create isolated home directory
         self.home_path = self.tmp_path / "test_home"
@@ -794,16 +795,28 @@ def wait_for_file(
 # =============================================================================
 
 
-def prompt_file_for_branch(tmp_path: Path, branch_name: str) -> Path:
-    """Return the path to the prompt file for the given branch."""
-    return tmp_path / f"workmux-prompt-{branch_name}.md"
+def prompt_file_for_branch(worktree_path: Path, branch_name: str) -> Path:
+    """Return the path to the prompt file for the given branch.
+
+    Prompt files are now stored in <worktree>/.workmux/PROMPT-<sanitized-branch>.md
+    Branch names with slashes are sanitized to dashes.
+    """
+    sanitized_branch = branch_name.replace("/", "-")
+    return worktree_path / ".workmux" / f"PROMPT-{sanitized_branch}.md"
 
 
 def assert_prompt_file_contents(
-    env: MuxEnvironment, branch_name: str, expected_text: str
+    env: MuxEnvironment,
+    branch_name: str,
+    expected_text: str,
+    worktree_path: Optional[Path] = None,
 ) -> None:
     """Assert that a prompt file exists for the branch and matches the expected text."""
-    prompt_file = prompt_file_for_branch(env.tmp_path, branch_name)
+    if worktree_path is None:
+        raise ValueError(
+            "worktree_path is required - prompt files are now in <worktree>/.workmux/"
+        )
+    prompt_file = prompt_file_for_branch(worktree_path, branch_name)
     assert prompt_file.exists(), f"Prompt file not found at {prompt_file}"
     actual_text = prompt_file.read_text()
     assert actual_text == expected_text, (
@@ -1045,6 +1058,9 @@ def mux_server(request, tmp_path: Path) -> Generator[MuxEnvironment, None, None]
     test_env.start_server()
     yield test_env
     test_env.stop_server()
+    # Clean up scripts directory if it was created
+    if test_env._scripts_dir is not None and test_env._scripts_dir.exists():
+        shutil.rmtree(test_env._scripts_dir, ignore_errors=True)
 
 
 @pytest.fixture(params=get_shells_to_test(), ids=lambda s: Path(s).name)
@@ -1320,6 +1336,55 @@ def get_window_name(branch_name: str) -> str:
     return f"{DEFAULT_WINDOW_PREFIX}{handle}"
 
 
+# Global counter to generate unique script names
+_script_counter = 0
+
+
+def get_scripts_dir(env: MuxEnvironment) -> Path:
+    """Get the directory for test helper scripts.
+
+    Uses a directory in /tmp (outside the git repo) to avoid being
+    affected by git operations like `git stash -u` which would stash
+    untracked files in the repo.
+
+    The scripts dir is cached on the env object to ensure consistent paths
+    across multiple calls within the same test. Uses tempfile.mkdtemp for
+    guaranteed uniqueness in parallel test runs.
+    """
+    # Cache the scripts dir on the env object for consistent paths
+    if env._scripts_dir is None:
+        # Use mkdtemp for guaranteed uniqueness (avoids hash collisions)
+        env._scripts_dir = Path(tempfile.mkdtemp(prefix="workmux_scripts_"))
+    return env._scripts_dir
+
+
+def make_env_script(env: MuxEnvironment, command: str, env_vars: dict[str, str]) -> str:
+    """Create a script file that sets environment variables and runs a command.
+
+    This avoids tmux send-keys line length limits when env vars or paths are long.
+
+    Args:
+        env: The multiplexer environment (provides tmp_path)
+        command: The shell command to run
+        env_vars: Environment variables to set (e.g., {"XDG_STATE_HOME": "/path"})
+
+    Returns:
+        Path to the script file (as string) that can be passed to send_keys
+    """
+    global _script_counter
+    _script_counter += 1
+    script_file = get_scripts_dir(env) / f"env_cmd_{_script_counter}.sh"
+
+    exports = "\n".join(f"export {k}={shlex.quote(v)}" for k, v in env_vars.items())
+    script_content = f"""#!/bin/sh
+{exports}
+{command}
+"""
+    script_file.write_text(script_content)
+    script_file.chmod(0o755)
+    return str(script_file)
+
+
 def run_workmux_command(
     env: MuxEnvironment,
     workmux_exe_path: Path,
@@ -1345,9 +1410,11 @@ def run_workmux_command(
         working_dir: Optional directory to run the command from (defaults to repo_path)
         stdin_input: Optional text to pipe to the command's stdin
     """
-    stdout_file = env.tmp_path / "workmux_stdout.txt"
-    stderr_file = env.tmp_path / "workmux_stderr.txt"
-    exit_code_file = env.tmp_path / "workmux_exit_code.txt"
+    scripts_dir = get_scripts_dir(env)
+    stdout_file = scripts_dir / "workmux_stdout.txt"
+    stderr_file = scripts_dir / "workmux_stderr.txt"
+    exit_code_file = scripts_dir / "workmux_exit_code.txt"
+    script_file = scripts_dir / "workmux_run.sh"
 
     for f in [stdout_file, stderr_file, exit_code_file]:
         if f.exists():
@@ -1358,55 +1425,35 @@ def run_workmux_command(
             env.mux_command(cmd_args)
 
     workdir = working_dir if working_dir is not None else repo_path
-    workdir_str = shlex.quote(str(workdir))
-    exe_str = shlex.quote(str(workmux_exe_path))
-    stdout_str = shlex.quote(str(stdout_file))
-    stderr_str = shlex.quote(str(stderr_file))
-    exit_code_str = shlex.quote(str(exit_code_file))
-
-    # Build env vars to pass to the command
-    env_vars = [f"PATH={shlex.quote(env.env['PATH'])}"]
-    if "TMPDIR" in env.env:
-        env_vars.append(f"TMPDIR={shlex.quote(env.env['TMPDIR'])}")
-    if "HOME" in env.env:
-        env_vars.append(f"HOME={shlex.quote(env.env['HOME'])}")
-
-    env_str = " ".join(env_vars)
 
     # Handle stdin piping via printf
     pipe_cmd = ""
     if stdin_input is not None:
-        pipe_cmd = f"printf {shlex.quote(stdin_input)} | "
+        pipe_cmd = f"printf %s {shlex.quote(stdin_input)} | "
 
-    workmux_cmd = (
-        f"cd {workdir_str} && "
-        f"{pipe_cmd}"
-        f"env {env_str} WORKMUX_TEST=1 {exe_str} {command} "
-        f"> {stdout_str} 2> {stderr_str}; "
-        f"echo $? > {exit_code_str}"
-    )
+    # Write the command to a script file to avoid tmux send-keys line length limits.
+    # The PATH can be very long in test environments, causing command truncation.
+    script_content = f"""#!/bin/sh
+trap 'echo $? > {shlex.quote(str(exit_code_file))}' EXIT
+export PATH={shlex.quote(env.env["PATH"])}
+export TMPDIR={shlex.quote(env.env.get("TMPDIR", "/tmp"))}
+export HOME={shlex.quote(env.env.get("HOME", ""))}
+export WORKMUX_TEST=1
+cd {shlex.quote(str(workdir))}
+{pipe_cmd}{shlex.quote(str(workmux_exe_path))} {command} > {shlex.quote(str(stdout_file))} 2> {shlex.quote(str(stderr_file))}
+"""
+    script_file.write_text(script_content)
+    script_file.chmod(0o755)
 
-    # Write the command to a temp file and source it, instead of sending
-    # the full command directly via send_keys. The inline env vars
-    # (especially PATH) can be very long and cause timeouts when sent
-    # through the pty under parallel test load.
-    fd, script_path = tempfile.mkstemp(suffix=".sh")
-    try:
-        os.write(fd, (workmux_cmd + "\n").encode())
-    finally:
-        os.close(fd)
-
-    env.send_keys("test:", f". {shlex.quote(script_path)}", enter=True)
+    # Execute the script - this keeps the send_keys command short
+    env.send_keys("test:", str(script_file), enter=True)
 
     if not poll_until_file_has_content(exit_code_file, timeout=5.0):
         # Capture pane content for debugging
         pane_content = env.capture_pane("test") or "(empty)"
-        os.unlink(script_path)
         raise AssertionError(
             f"workmux command did not complete in time\nPane content:\n{pane_content}"
         )
-
-    os.unlink(script_path)
 
     result = WorkmuxCommandResult(
         exit_code=int(exit_code_file.read_text().strip()),
@@ -1567,9 +1614,10 @@ def run_workmux_remove(
         expect_fail: If True, asserts the command fails (non-zero exit code)
         from_window: Optional window name to run the command from (useful for testing remove from within worktree window)
     """
-    stdout_file = env.tmp_path / "workmux_remove_stdout.txt"
-    stderr_file = env.tmp_path / "workmux_remove_stderr.txt"
-    exit_code_file = env.tmp_path / "workmux_remove_exit_code.txt"
+    scripts_dir = get_scripts_dir(env)
+    stdout_file = scripts_dir / "workmux_remove_stdout.txt"
+    stderr_file = scripts_dir / "workmux_remove_stderr.txt"
+    exit_code_file = scripts_dir / "workmux_remove_exit_code.txt"
 
     # Clean up any previous files
     for f in [stdout_file, stderr_file, exit_code_file]:
@@ -1637,6 +1685,7 @@ def run_workmux_merge(
     keep: bool = False,
     into: Optional[str] = None,
     no_verify: bool = False,
+    no_hooks: bool = False,
     notification: bool = False,
     expect_fail: bool = False,
     from_window: Optional[str] = None,
@@ -1662,9 +1711,10 @@ def run_workmux_merge(
         expect_fail: If True, asserts the command fails (non-zero exit code)
         from_window: Optional window name to run the command from
     """
-    stdout_file = env.tmp_path / "workmux_merge_stdout.txt"
-    stderr_file = env.tmp_path / "workmux_merge_stderr.txt"
-    exit_code_file = env.tmp_path / "workmux_merge_exit_code.txt"
+    scripts_dir = get_scripts_dir(env)
+    stdout_file = scripts_dir / "workmux_merge_stdout.txt"
+    stderr_file = scripts_dir / "workmux_merge_stderr.txt"
+    exit_code_file = scripts_dir / "workmux_merge_exit_code.txt"
 
     for f in [stdout_file, stderr_file, exit_code_file]:
         if f.exists():
@@ -1683,6 +1733,8 @@ def run_workmux_merge(
         flags.append(f"--into {into}")
     if no_verify:
         flags.append("--no-verify")
+    if no_hooks:
+        flags.append("--no-hooks")
     if notification:
         flags.append("--notification")
 
@@ -1692,18 +1744,18 @@ def run_workmux_merge(
     if from_window:
         from_branch = from_window.replace(DEFAULT_WINDOW_PREFIX, "")
         worktree_path = get_worktree_path(repo_path, from_branch)
-        script_dir = worktree_path
+        workdir = worktree_path
     else:
-        script_dir = repo_path
+        workdir = repo_path
 
     # Create a simple editor script for non-interactive git commits
-    editor_script = env.tmp_path / "git_editor.sh"
+    editor_script = scripts_dir / "git_editor.sh"
     editor_script.write_text('#!/bin/sh\necho "Auto commit from test" > "$1"\n')
     editor_script.chmod(0o755)
 
     merge_script = (
         f"export GIT_EDITOR={shlex.quote(str(editor_script))} && "
-        f"cd {script_dir} && "
+        f"cd {workdir} && "
         f"{workmux_exe_path} merge {flags_str} {branch_arg} "
         f"> {stdout_file} 2> {stderr_file}; "
         f"echo $? > {exit_code_file}"

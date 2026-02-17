@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 
 use crate::claude;
 use crate::git;
+use crate::sandbox;
 use tracing::{debug, info, warn};
 
 use super::cleanup;
@@ -100,6 +101,12 @@ pub fn remove(
         }
     }
 
+    // Stop any running containers for this worktree before killing the window.
+    // This is necessary because tmux kill-window sends SIGHUP which doesn't allow
+    // the supervisor's Drop handler to run. We try unconditionally since sandbox
+    // may have been enabled via --sandbox flag even if disabled in config.
+    sandbox::stop_containers_for_handle(actual_handle, &context.config.sandbox);
+
     info!(branch = %branch_name, keep_branch, "remove:cleanup start");
     let cleanup_result = cleanup::cleanup(
         context,
@@ -108,6 +115,7 @@ pub fn remove(
         &worktree_path,
         force,
         keep_branch,
+        false, // no_hooks: run hooks normally for user-initiated remove
     )?;
 
     // Navigate to the main branch window and close the source window
