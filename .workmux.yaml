@@ -12,6 +12,7 @@ files:
   copy:
     - .envrc # Copy direnv config (might need per-worktree customization)
   symlink:
+    - "<global>"
     - CLAUDE.md
     - tests/venv # Share Python venv for faster worktree creation
     - .ignore
