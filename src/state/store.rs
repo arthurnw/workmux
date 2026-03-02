@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::types::{AgentState, GlobalSettings, PaneKey};
+use crate::config::SandboxRuntime;
 
 /// Manages filesystem-based state persistence for workmux agents.
 ///
@@ -121,8 +122,8 @@ impl StateStore {
                 return false;
             }
             match live_pane_ids.get(&state.pane_key.pane_id) {
-                None => true,                             // pane gone
-                Some(live) => live.pid != state.pane_pid, // pane ID recycled
+                None => true,                                   // pane gone
+                Some(live) => live.pid != Some(state.pane_pid), // pane ID recycled
             }
         }))
     }
@@ -139,7 +140,7 @@ impl StateStore {
         for state in agents {
             let is_orphan = match live_pane_ids.get(&state.pane_key.pane_id) {
                 None => true,
-                Some(live) => live.pid != state.pane_pid,
+                Some(live) => live.pid != Some(state.pane_pid),
             };
             if is_orphan {
                 let _ = self.delete_agent(&state.pane_key);
@@ -192,11 +193,18 @@ impl StateStore {
 
     /// Register a running container for a worktree handle.
     ///
-    /// Creates a marker file at `containers/<handle>/<container_name>`.
-    pub fn register_container(&self, handle: &str, container_name: &str) -> Result<()> {
+    /// Creates a marker file at `containers/<handle>/<container_name>` with the
+    /// runtime's serde name as content for cleanup correctness.
+    pub fn register_container(
+        &self,
+        handle: &str,
+        container_name: &str,
+        runtime: &SandboxRuntime,
+    ) -> Result<()> {
         let dir = self.containers_dir().join(handle);
         fs::create_dir_all(&dir).context("Failed to create container state directory")?;
-        fs::write(dir.join(container_name), "").context("Failed to write container marker")?;
+        fs::write(dir.join(container_name), runtime.serde_name())
+            .context("Failed to write container marker")?;
         Ok(())
     }
 
@@ -216,7 +224,10 @@ impl StateStore {
     }
 
     /// List registered containers for a worktree handle.
-    pub fn list_containers(&self, handle: &str) -> Vec<String> {
+    ///
+    /// Returns container names paired with their stored runtime. For backwards
+    /// compatibility with empty marker files (pre-runtime-storage), defaults to Docker.
+    pub fn list_containers(&self, handle: &str) -> Vec<(String, SandboxRuntime)> {
         let dir = self.containers_dir().join(handle);
         if !dir.exists() {
             return Vec::new();
@@ -226,16 +237,23 @@ impl StateStore {
             .into_iter()
             .flatten()
             .filter_map(|entry| entry.ok())
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter(|name| !name.starts_with('.'))
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                if name.starts_with('.') {
+                    return None;
+                }
+                let runtime = fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|content| SandboxRuntime::from_serde_name(content.trim()))
+                    .unwrap_or_default();
+                Some((name, runtime))
+            })
             .collect()
     }
 
     /// Load agents with reconciliation against live multiplexer state.
     ///
-    /// Two-layer exit detection:
-    /// - **PID validation**: Pane was closed and recycled (stored PID != live PID)
-    /// - **Command comparison**: Agent exited within pane (foreground command changed)
+    /// Uses batched pane queries for performance, with backend-specific fallback validation.
     ///
     /// Returns only valid agents; removes stale state files.
     pub fn load_reconciled_agents(
@@ -260,34 +278,63 @@ impl StateStore {
             // Look up pane in the batched result
             let live_pane = live_panes.get(&state.pane_key.pane_id);
 
+            let pane_id = &state.pane_key.pane_id;
             match live_pane {
                 None => {
-                    // Pane no longer exists in multiplexer
-                    self.delete_agent(&state.pane_key)?;
-                    // Note: Can't clear window status since pane is gone
-                }
-                Some(live) if live.pid != state.pane_pid => {
-                    // PID mismatch - pane ID was recycled by a new process
-                    self.delete_agent(&state.pane_key)?;
-                    // Clear stale window status icon from status bar
-                    let _ = mux.clear_status(&state.pane_key.pane_id);
-                }
-                Some(live) if live.current_command != state.command => {
-                    // Command changed - agent exited (e.g., "node" -> "zsh")
-                    // Exceptions:
-                    // - status is None: hooks haven't fired yet, so the command
-                    //   change is likely shell → agent (initial startup).
-                    // - restored: status was carried forward from a prior session.
-                    //   The command change is again shell → agent, not an exit.
-                    // In both cases, keep the state until a hook confirms the agent.
-                    if state.status.is_none() || state.restored {
+                    // Pane not in batched result - use backend-specific validation
+                    if mux.validate_agent_alive(&state)? {
                         let agent_pane = state.to_agent_pane(
-                            live.session.clone().unwrap_or_default(),
-                            live.window.clone().unwrap_or_default(),
-                            live.title.clone(),
+                            state.session_name.clone().unwrap_or_default(),
+                            state.window_name.clone().unwrap_or_default(),
                         );
                         valid_agents.push(agent_pane);
                     } else {
+                        info!(pane_id, "reconcile: removing agent, pane no longer exists");
+                        self.delete_agent(&state.pane_key)?;
+                        let _ = mux.clear_status(&state.pane_key.pane_id);
+                    }
+                }
+                Some(live) if live.pid.is_some_and(|pid| pid != state.pane_pid) => {
+                    // PID mismatch - pane ID was recycled by a new process
+                    info!(
+                        pane_id,
+                        stored_pid = state.pane_pid,
+                        live_pid = live.pid.unwrap_or(0),
+                        "reconcile: removing agent, pane PID changed (pane ID recycled)"
+                    );
+                    self.delete_agent(&state.pane_key)?;
+                    let _ = mux.clear_status(&state.pane_key.pane_id);
+                }
+                Some(live)
+                    if live
+                        .current_command
+                        .as_ref()
+                        .is_some_and(|cmd| *cmd != state.command) =>
+                {
+                    // Command changed - agent exited (e.g., "node" -> "zsh")
+                    // Exceptions:
+                    // - status is None: hooks haven't fired yet, so the command
+                    //   change is likely shell -> agent (initial startup).
+                    // - restored: status was carried forward from a prior session.
+                    //   The command change is again shell -> agent, not an exit.
+                    // In both cases, keep the state until a hook confirms the agent.
+                    if state.status.is_none() || state.restored {
+                        let agent_pane = state.to_agent_pane(
+                            live.session
+                                .clone()
+                                .unwrap_or_else(|| state.session_name.clone().unwrap_or_default()),
+                            live.window
+                                .clone()
+                                .unwrap_or_else(|| state.window_name.clone().unwrap_or_default()),
+                        );
+                        valid_agents.push(agent_pane);
+                    } else {
+                        info!(
+                            pane_id,
+                            stored_command = state.command,
+                            live_command = live.current_command.as_deref().unwrap_or(""),
+                            "reconcile: removing agent, foreground command changed"
+                        );
                         self.delete_agent(&state.pane_key)?;
                         // Clear stale window status icon from status bar
                         let _ = mux.clear_status(&state.pane_key.pane_id);
@@ -296,9 +343,12 @@ impl StateStore {
                 Some(live) => {
                     // Valid - include in dashboard
                     let agent_pane = state.to_agent_pane(
-                        live.session.clone().unwrap_or_default(),
-                        live.window.clone().unwrap_or_default(),
-                        live.title.clone(),
+                        live.session
+                            .clone()
+                            .unwrap_or_else(|| state.session_name.clone().unwrap_or_default()),
+                        live.window
+                            .clone()
+                            .unwrap_or_else(|| state.window_name.clone().unwrap_or_default()),
                     );
                     valid_agents.push(agent_pane);
                 }
@@ -384,6 +434,8 @@ mod tests {
             command: "node".to_string(),
             updated_ts: 1234567890,
             restored: false,
+            window_name: Some("wm-test".to_string()),
+            session_name: Some("main".to_string()),
         }
     }
 
@@ -598,5 +650,59 @@ mod tests {
 
         let agents = store.list_all_agents().unwrap();
         assert_eq!(agents.len(), 1);
+    }
+
+    #[test]
+    fn test_register_container_stores_runtime() {
+        let (store, _dir) = test_store();
+        store
+            .register_container("handle", "container-1", &SandboxRuntime::AppleContainer)
+            .unwrap();
+
+        let containers = store.list_containers("handle");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].0, "container-1");
+        assert_eq!(containers[0].1, SandboxRuntime::AppleContainer);
+    }
+
+    #[test]
+    fn test_register_container_runtime_roundtrip() {
+        let (store, _dir) = test_store();
+
+        for runtime in [
+            SandboxRuntime::Docker,
+            SandboxRuntime::Podman,
+            SandboxRuntime::AppleContainer,
+        ] {
+            let name = format!("container-{}", runtime.binary_name());
+            store.register_container("handle", &name, &runtime).unwrap();
+        }
+
+        let containers = store.list_containers("handle");
+        assert_eq!(containers.len(), 3);
+
+        let by_name: std::collections::HashMap<&str, &SandboxRuntime> =
+            containers.iter().map(|(n, r)| (n.as_str(), r)).collect();
+        assert_eq!(by_name["container-docker"], &SandboxRuntime::Docker);
+        assert_eq!(by_name["container-podman"], &SandboxRuntime::Podman);
+        assert_eq!(
+            by_name["container-container"],
+            &SandboxRuntime::AppleContainer
+        );
+    }
+
+    #[test]
+    fn test_list_containers_empty_marker_defaults_to_docker() {
+        let (store, dir) = test_store();
+
+        // Simulate old marker file with empty content
+        let container_dir = dir.path().join("containers").join("handle");
+        fs::create_dir_all(&container_dir).unwrap();
+        fs::write(container_dir.join("old-container"), "").unwrap();
+
+        let containers = store.list_containers("handle");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].0, "old-container");
+        assert_eq!(containers[0].1, SandboxRuntime::Docker);
     }
 }

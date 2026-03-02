@@ -4,12 +4,14 @@
 //! with different terminal multiplexers (tmux, WezTerm) interchangeably.
 
 pub mod agent;
+pub mod handle;
 pub mod handshake;
 pub mod kitty;
 pub mod tmux;
 pub mod types;
 pub mod util;
 pub mod wezterm;
+pub mod zellij;
 
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
@@ -17,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use handle::MuxHandle;
 pub use handshake::PaneHandshake;
 pub use tmux::TmuxBackend;
 pub use types::*;
@@ -48,14 +51,45 @@ pub trait Multiplexer: Send + Sync {
 
     // === Window/Tab Management ===
 
-    /// Create a new window/tab with the given parameters
+    /// Create a new window/tab with the given parameters.
+    /// Returns: Window identifier (pane ID for tmux/WezTerm, tab name for Zellij)
     fn create_window(&self, params: CreateWindowParams) -> Result<String>;
+
+    /// Create a new session with the given parameters.
+    /// Returns the initial pane ID of the new session.
+    /// For backends that don't support sessions (e.g., WezTerm), this may create a workspace.
+    fn create_session(&self, params: CreateSessionParams) -> Result<String>;
+
+    /// Create a new window within an existing session.
+    /// Returns the pane ID of the new window's initial pane.
+    /// Only supported by backends with session support (tmux).
+    fn create_window_in_session(&self, params: CreateWindowInSessionParams) -> Result<String> {
+        let _ = params;
+        Err(anyhow!(
+            "Multi-window sessions are not supported by the {} backend",
+            self.name()
+        ))
+    }
+
+    /// Switch to a session by prefix and name.
+    /// For tmux, this switches the client to the session.
+    /// For WezTerm, this may switch to a workspace.
+    fn switch_to_session(&self, prefix: &str, name: &str) -> Result<()>;
+
+    /// Check if a session exists by its full name.
+    fn session_exists(&self, full_name: &str) -> Result<bool>;
+
+    /// Kill a session by its full name (including prefix).
+    fn kill_session(&self, full_name: &str) -> Result<()>;
 
     /// Kill a window by its full name (including prefix)
     fn kill_window(&self, full_name: &str) -> Result<()>;
 
     /// Schedule a window to close after a delay
     fn schedule_window_close(&self, full_name: &str, delay: Duration) -> Result<()>;
+
+    /// Schedule a session to close after a delay
+    fn schedule_session_close(&self, full_name: &str, delay: Duration) -> Result<()>;
 
     /// Run a deferred script in the background (for cleanup operations).
     /// For tmux, this uses `run-shell`. For other backends, may use different mechanisms.
@@ -68,6 +102,24 @@ pub trait Multiplexer: Send + Sync {
     /// Generate a shell command string to close/kill a window by full name.
     /// Used in deferred scripts that run asynchronously via `run_deferred_script`.
     fn shell_kill_window_cmd(&self, full_name: &str) -> Result<String>;
+
+    /// Generate a shell command string to switch to a session by full name.
+    /// Used in deferred scripts that run asynchronously via `run_deferred_script`.
+    fn shell_switch_session_cmd(&self, full_name: &str) -> Result<String>;
+
+    /// Generate a shell command string to kill a session by full name.
+    /// Used in deferred scripts that run asynchronously via `run_deferred_script`.
+    fn shell_kill_session_cmd(&self, full_name: &str) -> Result<String>;
+
+    /// Generate a shell command string to switch to the last/previous session.
+    /// Used in deferred scripts before killing the current session so the client
+    /// returns to the session the user was on previously.
+    fn shell_switch_to_last_session_cmd(&self) -> Result<String> {
+        Err(anyhow!(
+            "shell_switch_to_last_session_cmd not supported by {} backend",
+            self.name()
+        ))
+    }
 
     /// Select (focus) a window by prefix and name
     fn select_window(&self, prefix: &str, name: &str) -> Result<()>;
@@ -83,6 +135,9 @@ pub trait Multiplexer: Send + Sync {
 
     /// Get all window names in the current session
     fn get_all_window_names(&self) -> Result<HashSet<String>>;
+
+    /// Get all session names
+    fn get_all_session_names(&self) -> Result<HashSet<String>>;
 
     /// Filter a list of window names, returning only those that still exist
     fn filter_active_windows(&self, windows: &[String]) -> Result<Vec<String>>;
@@ -100,13 +155,26 @@ pub trait Multiplexer: Send + Sync {
     /// Wait until all specified windows are closed
     fn wait_until_windows_closed(&self, full_window_names: &[String]) -> Result<()>;
 
+    /// Wait until the specified session is closed
+    fn wait_until_session_closed(&self, full_session_name: &str) -> Result<()>;
+
     // === Pane Management ===
 
     /// Select (focus) a pane by ID
     fn select_pane(&self, pane_id: &str) -> Result<()>;
 
-    /// Switch to a pane (may also switch windows/tabs as needed)
-    fn switch_to_pane(&self, pane_id: &str) -> Result<()>;
+    /// Switch to a pane (may also switch windows/tabs as needed).
+    ///
+    /// `window_hint` provides the window/tab name for backends that need it
+    /// (e.g., Zellij can't look up a pane by ID alone). Backends that can
+    /// switch by pane ID directly (tmux, WezTerm) ignore this parameter.
+    fn switch_to_pane(&self, pane_id: &str, window_hint: Option<&str>) -> Result<()>;
+
+    /// Whether jumping to a pane should exit the dashboard.
+    /// Defaults to true. Override to return false to keep the dashboard open after jumping.
+    fn should_exit_on_jump(&self) -> bool {
+        true
+    }
 
     /// Respawn a pane with optional command. Returns the (possibly new) pane ID.
     fn respawn_pane(&self, pane_id: &str, cwd: &Path, cmd: Option<&str>) -> Result<String>;
@@ -114,10 +182,24 @@ pub trait Multiplexer: Send + Sync {
     /// Capture the content of a pane
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String>;
 
+    /// Whether this backend supports preview capture efficiently.
+    /// Defaults to true. Override to return false for backends where preview capture
+    /// requires expensive operations (process spawning, temp files).
+    fn supports_preview(&self) -> bool {
+        true
+    }
+
     // === Text I/O ===
 
     /// Send keys (command + Enter) to a pane
     fn send_keys(&self, pane_id: &str, command: &str) -> Result<()>;
+
+    /// Whether this backend requires focusing a pane before sending input to it.
+    /// Defaults to false. Backends like Zellij that can't target unfocused panes
+    /// override this to return true.
+    fn requires_focus_for_input(&self) -> bool {
+        false
+    }
 
     /// Send keys to an agent pane, with special handling for Claude's ! prefix
     fn send_keys_to_agent(&self, pane_id: &str, command: &str, agent: Option<&str>) -> Result<()>;
@@ -127,6 +209,11 @@ pub trait Multiplexer: Send + Sync {
 
     /// Paste multiline content to a pane (using bracketed paste)
     fn paste_multiline(&self, pane_id: &str, content: &str) -> Result<()>;
+
+    /// Clear the pane screen. Default is no-op; backends override if needed.
+    fn clear_pane(&self, _pane_id: &str) -> Result<()> {
+        Ok(())
+    }
 
     // === Shell ===
 
@@ -153,6 +240,7 @@ pub trait Multiplexer: Send + Sync {
     // === Pane Setup ===
 
     /// Split a pane, returning the new pane ID.
+    /// Returns: Pane identifier (accurate for tmux/WezTerm, tab name for Zellij)
     fn split_pane(
         &self,
         target_pane_id: &str,
@@ -211,6 +299,9 @@ pub trait Multiplexer: Send + Sync {
             );
 
             let pane_id = if let Some(resolved) = adjusted_command {
+                // Use per-pane agent if set, otherwise fall back to window-level agent
+                let pane_agent = resolved.effective_agent.as_deref().or(effective_agent);
+
                 // Spawn with handshake so we can send the command after shell is ready
                 let handshake = self.create_handshake()?;
                 let script = handshake.script_content(&shell);
@@ -238,6 +329,7 @@ pub trait Multiplexer: Send + Sync {
                 // Detect if this is an agent pane for sandbox targeting
                 let is_agent_pane = pane_config.command.as_deref().is_some_and(|cmd| {
                     cmd == "<agent>"
+                        || agent::is_known_agent(cmd)
                         || effective_agent.is_some_and(|a| crate::config::is_agent_command(cmd, a))
                 });
 
@@ -255,8 +347,7 @@ pub trait Multiplexer: Send + Sync {
                         // (sandbox provides the security boundary, so permission
                         // prompts are unnecessary and break autonomous workflow)
                         let command_to_wrap = if is_agent_pane {
-                            let profile =
-                                crate::multiplexer::agent::resolve_profile(effective_agent);
+                            let profile = crate::multiplexer::agent::resolve_profile(pane_agent);
                             if let Some(flag) = profile.skip_permissions_flag() {
                                 util::inject_skip_permissions_flag(&resolved.command, flag)
                             } else {
@@ -310,6 +401,7 @@ pub trait Multiplexer: Send + Sync {
                     resolved.command.clone()
                 };
 
+                let _ = self.clear_pane(&spawned_id);
                 self.send_keys(&spawned_id, &final_command)?;
 
                 // Track agent panes
@@ -322,7 +414,7 @@ pub trait Multiplexer: Send + Sync {
 
                 // Set working status for agent panes with injected prompts
                 if resolved.prompt_injected
-                    && agent::resolve_profile(effective_agent).needs_auto_status()
+                    && agent::resolve_profile(pane_agent).needs_auto_status()
                 {
                     let icon = config.status_icons.working();
                     if config.status_format.unwrap_or(true) {
@@ -444,6 +536,29 @@ pub trait Multiplexer: Send + Sync {
     /// Returns a HashMap from pane_id to LivePaneInfo. This is more efficient
     /// than calling get_live_pane_info repeatedly when validating many panes.
     fn get_all_live_pane_info(&self) -> Result<std::collections::HashMap<String, LivePaneInfo>>;
+
+    /// Validate if an agent is still alive and should be kept in the dashboard.
+    ///
+    /// Called when a pane is not found in the batched `get_all_live_pane_info()` result.
+    /// Backends can implement custom validation logic (e.g., Zellij checks pane existence
+    /// and command matching). Default implementation queries the pane individually.
+    fn validate_agent_alive(&self, state: &crate::state::AgentState) -> Result<bool> {
+        let live_pane = self.get_live_pane_info(&state.pane_key.pane_id)?;
+
+        match live_pane {
+            None => Ok(false), // Pane no longer exists
+            Some(ref live) if live.pid.is_some_and(|pid| pid != state.pane_pid) => Ok(false), // PID mismatch
+            Some(ref live)
+                if live
+                    .current_command
+                    .as_ref()
+                    .is_some_and(|cmd| *cmd != state.command) =>
+            {
+                Ok(false) // Command changed
+            }
+            Some(_) => Ok(true), // Valid
+        }
+    }
 }
 
 /// Detect which backend to use based on environment.
@@ -456,8 +571,9 @@ pub trait Multiplexer: Send + Sync {
 /// 1. `$WORKMUX_BACKEND` set → use that backend
 /// 2. `$TMUX` set → tmux
 /// 3. `$WEZTERM_PANE` set → WezTerm
-/// 4. `$KITTY_WINDOW_ID` set → Kitty
-/// 5. None → defaults to tmux (for backward compatibility)
+/// 4. `$ZELLIJ` set → Zellij
+/// 5. `$KITTY_WINDOW_ID` set → Kitty
+/// 6. None → defaults to tmux (for backward compatibility)
 ///
 /// This ordering ensures that running tmux inside kitty (or wezterm) correctly
 /// selects the innermost multiplexer.
@@ -466,7 +582,9 @@ pub fn detect_backend() -> BackendType {
         match val.parse() {
             Ok(bt) => return bt,
             Err(_) => {
-                eprintln!("workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty");
+                eprintln!(
+                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty|zellij"
+                );
             }
         }
     }
@@ -474,18 +592,23 @@ pub fn detect_backend() -> BackendType {
     resolve_backend(
         std::env::var("TMUX").is_ok(),
         std::env::var("WEZTERM_PANE").is_ok(),
+        std::env::var("ZELLIJ").is_ok(),
         std::env::var("KITTY_WINDOW_ID").is_ok(),
     )
 }
 
 /// Pure auto-detection logic, separated for testability.
-fn resolve_backend(tmux: bool, wezterm: bool, kitty: bool) -> BackendType {
+fn resolve_backend(tmux: bool, wezterm: bool, zellij: bool, kitty: bool) -> BackendType {
     if tmux {
         return BackendType::Tmux;
     }
 
     if wezterm {
         return BackendType::WezTerm;
+    }
+
+    if zellij {
+        return BackendType::Zellij;
     }
 
     if kitty {
@@ -501,6 +624,7 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
         BackendType::Tmux => Arc::new(TmuxBackend::new()),
         BackendType::WezTerm => Arc::new(wezterm::WezTermBackend::new()),
         BackendType::Kitty => Arc::new(kitty::KittyBackend::new()),
+        BackendType::Zellij => Arc::new(zellij::ZellijBackend::new()),
     }
 }
 
@@ -510,41 +634,77 @@ mod tests {
 
     #[test]
     fn no_env_defaults_to_tmux() {
-        assert_eq!(resolve_backend(false, false, false), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(false, false, false, false),
+            BackendType::Tmux
+        );
     }
 
     #[test]
     fn tmux_only() {
-        assert_eq!(resolve_backend(true, false, false), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(true, false, false, false),
+            BackendType::Tmux
+        );
     }
 
     #[test]
     fn wezterm_only() {
-        assert_eq!(resolve_backend(false, true, false), BackendType::WezTerm);
+        assert_eq!(
+            resolve_backend(false, true, false, false),
+            BackendType::WezTerm
+        );
+    }
+
+    #[test]
+    fn zellij_only() {
+        assert_eq!(
+            resolve_backend(false, false, true, false),
+            BackendType::Zellij
+        );
     }
 
     #[test]
     fn kitty_only() {
-        assert_eq!(resolve_backend(false, false, true), BackendType::Kitty);
+        assert_eq!(
+            resolve_backend(false, false, false, true),
+            BackendType::Kitty
+        );
     }
 
     #[test]
     fn tmux_inside_kitty() {
-        assert_eq!(resolve_backend(true, false, true), BackendType::Tmux);
+        assert_eq!(resolve_backend(true, false, false, true), BackendType::Tmux);
     }
 
     #[test]
     fn tmux_inside_wezterm() {
-        assert_eq!(resolve_backend(true, true, false), BackendType::Tmux);
+        assert_eq!(resolve_backend(true, true, false, false), BackendType::Tmux);
+    }
+
+    #[test]
+    fn tmux_inside_zellij() {
+        assert_eq!(resolve_backend(true, false, true, false), BackendType::Tmux);
     }
 
     #[test]
     fn wezterm_inside_kitty() {
-        assert_eq!(resolve_backend(false, true, true), BackendType::WezTerm);
+        assert_eq!(
+            resolve_backend(false, true, false, true),
+            BackendType::WezTerm
+        );
+    }
+
+    #[test]
+    fn zellij_inside_kitty() {
+        assert_eq!(
+            resolve_backend(false, false, true, true),
+            BackendType::Zellij
+        );
     }
 
     #[test]
     fn all_env_vars_set() {
-        assert_eq!(resolve_backend(true, true, true), BackendType::Tmux);
+        assert_eq!(resolve_backend(true, true, true, true), BackendType::Tmux);
     }
 }

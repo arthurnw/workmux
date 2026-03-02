@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 
 use crate::cmd::Cmd;
+use crate::config::MuxMode;
 
 use super::WorktreeNotFound;
 use super::branch::unset_branch_upstream;
@@ -146,6 +147,94 @@ pub fn list_worktrees() -> Result<Vec<(PathBuf, String)>> {
         .run_and_capture_stdout()
         .context("Failed to list worktrees")?;
     parse_worktree_list_porcelain(&list)
+}
+
+/// Store per-worktree metadata in git config.
+pub fn set_worktree_meta(handle: &str, key: &str, value: &str) -> Result<()> {
+    Cmd::new("git")
+        .args(&[
+            "config",
+            "--local",
+            &format!("workmux.worktree.{}.{}", handle, key),
+            value,
+        ])
+        .run()
+        .with_context(|| format!("Failed to set worktree metadata {}.{}", handle, key))?;
+    Ok(())
+}
+
+/// Retrieve per-worktree metadata from git config.
+/// Returns None if the key doesn't exist.
+pub fn get_worktree_meta(handle: &str, key: &str) -> Option<String> {
+    Cmd::new("git")
+        .args(&[
+            "config",
+            "--local",
+            "--get",
+            &format!("workmux.worktree.{}.{}", handle, key),
+        ])
+        .run_and_capture_stdout()
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Determine the tmux mode for a worktree from git metadata.
+/// Falls back to Window mode if no metadata is found (backward compatibility).
+pub fn get_worktree_mode(handle: &str) -> MuxMode {
+    match get_worktree_meta(handle, "mode") {
+        Some(mode) if mode == "session" => MuxMode::Session,
+        _ => MuxMode::Window,
+    }
+}
+
+/// Batch-load all worktree modes from git config in a single subprocess call.
+/// Returns a map from handle to MuxMode. Handles not in the map default to Window.
+pub fn get_all_worktree_modes() -> std::collections::HashMap<String, MuxMode> {
+    let output = Cmd::new("git")
+        .args(&[
+            "config",
+            "--local",
+            "--get-regexp",
+            r"^workmux\.worktree\..*\.mode$",
+        ])
+        .run_and_capture_stdout()
+        .unwrap_or_default();
+
+    let mut modes = std::collections::HashMap::new();
+    for line in output.lines() {
+        // Format: "workmux.worktree.<handle>.mode <value>"
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() == 2 {
+            let key = parts[0];
+            let value = parts[1].trim();
+            // Extract handle from "workmux.worktree.<handle>.mode"
+            if let Some(rest) = key.strip_prefix("workmux.worktree.")
+                && let Some(handle) = rest.strip_suffix(".mode")
+            {
+                let mode = if value == "session" {
+                    MuxMode::Session
+                } else {
+                    MuxMode::Window
+                };
+                modes.insert(handle.to_string(), mode);
+            }
+        }
+    }
+    modes
+}
+
+/// Remove all metadata for a worktree handle.
+pub fn remove_worktree_meta(handle: &str) -> Result<()> {
+    // Use --remove-section to remove all keys under the handle's section
+    let _ = Cmd::new("git")
+        .args(&[
+            "config",
+            "--local",
+            "--remove-section",
+            &format!("workmux.worktree.{}", handle),
+        ])
+        .run();
+    Ok(())
 }
 
 /// Get the main worktree root directory (not a linked worktree)

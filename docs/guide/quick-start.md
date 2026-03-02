@@ -4,6 +4,10 @@ description: Get started with workmux in minutes
 
 # Quick start
 
+::: info Prerequisites
+workmux requires a terminal multiplexer. Make sure you have [tmux](https://github.com/tmux/tmux) (or [WezTerm](/guide/wezterm) / [Kitty](/guide/kitty) / [Zellij](/guide/zellij)) installed and running before you start. See [My tmux setup](https://raine.dev/blog/my-tmux-setup/) if you need a starting point.
+:::
+
 ## 1. Install
 
 ```bash
@@ -29,6 +33,8 @@ workmux add new-feature
 This will:
 
 - Create a git worktree at `<project_root>/../<project_name>__worktrees/new-feature`
+- Copy config files and symlink dependencies (if [configured](/guide/configuration#file-operations))
+- Run any [`post_create`](/guide/configuration#lifecycle-hooks) setup commands
 - Create a tmux window named `wm-new-feature` (the prefix is configurable)
 - Set up your configured or the default tmux pane layout
 - Automatically switch your tmux client to the new window

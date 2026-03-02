@@ -31,6 +31,8 @@ Paths starting with `~` are expanded to the user's home directory. When `guest_p
 
 **Note:** For the Lima backend, mount changes only take effect when the VM is created. To apply changes to an existing VM, recreate it with `workmux sandbox prune`.
 
+**Note:** Apple Container only supports directory mounts. Individual file paths in `extra_mounts` will fail with Apple Container.
+
 ## Host command proxying
 
 The `host_commands` option lets agents inside the sandbox run specific commands on the host machine. It's useful for project toolchain commands (build tools, task runners, linters) that are available on the host but would be slow or complex to install inside the sandbox. Running builds on the host is also faster since both backends use virtualization on macOS, and filesystem I/O through mount sharing adds overhead for build-heavy workloads.
@@ -81,6 +83,12 @@ Claude Code hooks often use `afplay` to play notification sounds (e.g., when an 
 
 This is transparent: when a hook runs `afplay /System/Library/Sounds/Glass.aiff` inside the sandbox, the shim runs `afplay` on the host via the host-exec RPC mechanism. No configuration is needed.
 
+## Clipboard proxy
+
+Image pasting via Ctrl+V works inside the sandbox. workmux provides built-in shims for `wl-paste` and `xclip` that transparently proxy clipboard reads to the host. No configuration is needed.
+
+Currently only `image/png` is supported. Text clipboard works natively through the terminal and does not need proxying.
+
 ## Git identity
 
 The sandbox does not mount your `~/.gitconfig` because it may contain credential helpers, shell aliases, or other sensitive configuration. Instead, workmux automatically extracts your `user.name` and `user.email` from the host's git config and injects them into the sandbox via environment variables (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`).
@@ -93,11 +101,11 @@ No configuration is needed. If the host has no `user.name` or `user.email` confi
 
 Both sandbox backends mount agent-specific credential directories from the host. The mounted directory depends on the configured `agent`:
 
-| Agent | Host directory | Container mount | Lima mount |
-| --- | --- | --- | --- |
-| `claude` | `~/.claude/` | `/tmp/.claude/` | `$HOME/.claude/` |
-| `gemini` | `~/.gemini/` | `/tmp/.gemini/` | `$HOME/.gemini/` |
-| `codex` | `~/.codex/` | `/tmp/.codex/` | `$HOME/.codex/` |
+| Agent      | Host directory             | Container mount               | Lima mount                     |
+| ---------- | -------------------------- | ----------------------------- | ------------------------------ |
+| `claude`   | `~/.claude/`               | `/tmp/.claude/`               | `$HOME/.claude/`               |
+| `gemini`   | `~/.gemini/`               | `/tmp/.gemini/`               | `$HOME/.gemini/`               |
+| `codex`    | `~/.codex/`                | `/tmp/.codex/`                | `$HOME/.codex/`                |
 | `opencode` | `~/.local/share/opencode/` | `/tmp/.local/share/opencode/` | `$HOME/.local/share/opencode/` |
 
 Key behaviors:
@@ -107,7 +115,7 @@ Key behaviors:
 - Authentication done inside the sandbox writes back to the host directory. Credentials persist across sandbox recreations.
 - The credential mount is determined by the `agent` setting. Switching agents requires recreating the sandbox (Lima) or starting a new container.
 
-The container backend also uses `~/.claude-sandbox.json` as a separate config file for Claude, mounted to `/tmp/.claude.json`.
+The container backend also uses a separate config file for Claude, mounted to `/tmp/.claude.json` inside the container. Docker/Podman use `~/.claude-sandbox.json` (file mount); Apple Container uses `~/.claude-sandbox-config/claude.json` (directory mount, since Apple Container only supports directory mounts).
 
 ### Custom config directory
 
@@ -145,6 +153,7 @@ The supervisor and guest communicate via JSON-lines over TCP. Each request is a 
 - `SpawnAgent` - runs `workmux add` on the host to create a new worktree and pane
 - `Exec` - runs a command on the host and streams stdout/stderr back (used by host-exec shims, including built-in `afplay`)
 - `Merge` - runs `workmux merge` on the host with all flags forwarded
+- `ClipboardRead` - reads the host clipboard and writes image data to the shared worktree filesystem (used by `wl-paste`/`xclip` shims)
 
 Requests are authenticated with a per-session token passed via the `WM_RPC_TOKEN` environment variable.
 

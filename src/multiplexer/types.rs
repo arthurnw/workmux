@@ -54,6 +54,30 @@ pub struct CreateWindowParams<'a> {
     pub target_session: Option<&'a str>,
 }
 
+/// Parameters for creating a new session
+#[derive(Debug, Clone)]
+pub struct CreateSessionParams<'a> {
+    /// Prefix for the session name (e.g., "wm-")
+    pub prefix: &'a str,
+    /// Base session name
+    pub name: &'a str,
+    /// Working directory for the session's initial window
+    pub cwd: &'a std::path::Path,
+    /// Optional name for the initial window. If None, tmux auto-names it.
+    pub initial_window_name: Option<&'a str>,
+}
+
+/// Parameters for creating a new window within an existing session
+#[derive(Debug, Clone)]
+pub struct CreateWindowInSessionParams<'a> {
+    /// Full session name (already prefixed, e.g., "wm-feature-auth")
+    pub session_name: &'a str,
+    /// Optional window name. If None, tmux auto-names based on running command.
+    pub name: Option<&'a str>,
+    /// Working directory for the window
+    pub cwd: &'a std::path::Path,
+}
+
 /// Result of setting up panes in a window
 #[derive(Debug, Clone)]
 pub struct PaneSetupResult {
@@ -88,6 +112,8 @@ pub enum BackendType {
     WezTerm,
     /// Kitty backend
     Kitty,
+    /// Zellij backend
+    Zellij,
 }
 
 impl std::fmt::Display for BackendType {
@@ -96,6 +122,7 @@ impl std::fmt::Display for BackendType {
             BackendType::Tmux => write!(f, "tmux"),
             BackendType::WezTerm => write!(f, "wezterm"),
             BackendType::Kitty => write!(f, "kitty"),
+            BackendType::Zellij => write!(f, "zellij"),
         }
     }
 }
@@ -108,6 +135,7 @@ impl std::str::FromStr for BackendType {
             "tmux" => Ok(BackendType::Tmux),
             "wezterm" => Ok(BackendType::WezTerm),
             "kitty" => Ok(BackendType::Kitty),
+            "zellij" => Ok(BackendType::Zellij),
             other => Err(format!("unknown backend: {}", other)),
         }
     }
@@ -119,11 +147,11 @@ impl std::str::FromStr for BackendType {
 /// used to validate stored state against actual pane state.
 #[derive(Debug, Clone)]
 pub struct LivePaneInfo {
-    /// PID of the pane's shell process
-    pub pid: u32,
+    /// PID of the pane's shell process (None if backend doesn't expose PIDs)
+    pub pid: Option<u32>,
 
-    /// Current foreground command (e.g., "node", "zsh")
-    pub current_command: String,
+    /// Current foreground command (e.g., "node", "zsh"). None if backend doesn't expose it.
+    pub current_command: Option<String>,
 
     /// Working directory
     pub working_dir: PathBuf,

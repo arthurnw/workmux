@@ -5,7 +5,7 @@ use crate::git;
 use crate::sandbox;
 use tracing::{debug, info, warn};
 
-use super::cleanup;
+use super::cleanup::{self, get_worktree_mode};
 use super::context::WorkflowContext;
 use super::types::RemoveResult;
 
@@ -36,6 +36,9 @@ pub fn remove(
         })?;
 
     debug!(handle = actual_handle, branch = branch_name, path = %worktree_path.display(), "remove:worktree resolved");
+
+    // Capture mode BEFORE cleanup (cleanup removes the metadata)
+    let mode = get_worktree_mode(actual_handle);
 
     // Safety Check: Prevent deleting the main worktree itself, regardless of branch.
     let is_main_worktree = match (
@@ -105,7 +108,7 @@ pub fn remove(
     // This is necessary because tmux kill-window sends SIGHUP which doesn't allow
     // the supervisor's Drop handler to run. We try unconditionally since sandbox
     // may have been enabled via --sandbox flag even if disabled in config.
-    sandbox::stop_containers_for_handle(actual_handle, &context.config.sandbox);
+    sandbox::stop_containers_for_handle(actual_handle);
 
     info!(branch = %branch_name, keep_branch, "remove:cleanup start");
     let cleanup_result = cleanup::cleanup(
@@ -118,13 +121,14 @@ pub fn remove(
         false, // no_hooks: run hooks normally for user-initiated remove
     )?;
 
-    // Navigate to the main branch window and close the source window
+    // Navigate to the main branch window/session and close the source
     cleanup::navigate_to_target_and_close(
         context.mux.as_ref(),
         &context.prefix,
         &context.main_branch,
         actual_handle,
         &cleanup_result,
+        mode,
     )?;
 
     Ok(RemoveResult {

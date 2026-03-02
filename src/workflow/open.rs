@@ -2,8 +2,11 @@ use anyhow::{Context, Result, anyhow};
 use regex::Regex;
 
 use crate::git;
+use crate::multiplexer::MuxHandle;
+use crate::multiplexer::util::prefixed;
 use tracing::info;
 
+use super::cleanup::get_worktree_mode;
 use super::context::WorkflowContext;
 use super::setup;
 use super::types::{CreateResult, SetupOptions};
@@ -24,7 +27,19 @@ pub fn open(
         "open:start"
     );
 
-    // Validate pane config before any other operations
+    // Validate layout config before any other operations
+    if context.config.panes.is_some() && context.config.windows.is_some() {
+        anyhow::bail!("Cannot specify both 'panes' and 'windows' in configuration.");
+    }
+    if let Some(windows) = &context.config.windows {
+        if options.mode != crate::config::MuxMode::Session {
+            anyhow::bail!(
+                "'windows' configuration requires 'mode: session'. \
+                 Add 'mode: session' to your config."
+            );
+        }
+        crate::config::validate_windows_config(windows)?;
+    }
     if let Some(panes) = &context.config.panes {
         crate::config::validate_panes_config(panes)?;
     }
@@ -48,20 +63,25 @@ pub fn open(
         .to_string_lossy()
         .to_string();
 
-    // Determine final handle (with or without suffix)
-    let window_exists =
-        context
-            .mux
-            .window_exists_in_session(&context.prefix, &base_handle, target_session)?;
+    // Determine the target mode from stored metadata (or default to Window)
+    let stored_mode = get_worktree_mode(&base_handle);
+    let target = MuxHandle::new(
+        context.mux.as_ref(),
+        stored_mode,
+        &context.prefix,
+        &base_handle,
+    );
+    let target_exists = target.exists()?;
 
-    // If window exists and we're not forcing new, switch to it
-    if window_exists && !new_window {
-        context.mux.select_window(&context.prefix, &base_handle)?;
+    // If target exists and we're not forcing new, switch to it
+    if target_exists && !new_window {
+        target.select()?;
         info!(
             handle = base_handle,
             branch = branch_name,
             path = %worktree_path.display(),
-            "open:switched to existing window"
+            kind = target.kind(),
+            "open:switched to existing target"
         );
         return Ok(CreateResult {
             worktree_path,
@@ -72,8 +92,15 @@ pub fn open(
         });
     }
 
-    // Determine handle: use suffix if forcing new window and one exists
-    let (handle, after_window) = if new_window && window_exists {
+    // Session mode doesn't support --new (duplicate sessions would be orphaned on cleanup)
+    if new_window && target.is_session() {
+        return Err(anyhow!(
+            "--new is not supported in session mode. Each worktree can only have one session."
+        ));
+    }
+
+    // Determine handle: use suffix if forcing new target and one exists
+    let (handle, after_window) = if new_window && target_exists {
         let unique_handle = resolve_unique_handle(context, &base_handle)?;
         // Insert after the last window in the base handle group (base or -N suffixes)
         let after = context
@@ -107,6 +134,7 @@ pub fn open(
     let options_with_workdir = SetupOptions {
         working_dir,
         config_root,
+        mode: stored_mode,
         ..options
     };
 
@@ -157,18 +185,19 @@ pub fn open(
 /// Find a unique handle by appending a suffix if necessary.
 ///
 /// If `base_handle` is "my-feature" and windows exist for:
-/// - wm:my-feature
-/// - wm:my-feature-2
+/// - wm-my-feature
+/// - wm-my-feature-2
 ///
 /// This returns "my-feature-3".
+///
+/// Note: Only called in window mode (session mode rejects --new).
 fn resolve_unique_handle(context: &WorkflowContext, base_handle: &str) -> Result<String> {
-    use crate::multiplexer::util::prefixed;
-    let all_windows = context.mux.get_all_window_names()?;
+    let all_names = context.mux.get_all_window_names()?;
     let prefix = &context.prefix;
     let full_base = prefixed(prefix, base_handle);
 
     // If base name doesn't exist, use it directly
-    if !all_windows.contains(&full_base) {
+    if !all_names.contains(&full_base) {
         return Ok(base_handle.to_string());
     }
 
@@ -180,8 +209,8 @@ fn resolve_unique_handle(context: &WorkflowContext, base_handle: &str) -> Result
 
     let mut max_suffix: u32 = 1; // Start at 1 so first duplicate is -2
 
-    for window_name in &all_windows {
-        if let Some(caps) = re.captures(window_name)
+    for name in &all_names {
+        if let Some(caps) = re.captures(name)
             && let Some(num_match) = caps.get(1)
             && let Ok(num) = num_match.as_str().parse::<u32>()
         {

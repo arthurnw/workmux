@@ -3,7 +3,7 @@ use anyhow::{Context, Result, anyhow};
 use crate::{cmd, git, llm, spinner};
 use tracing::{debug, info};
 
-use super::cleanup;
+use super::cleanup::{self, get_worktree_mode};
 use super::context::WorkflowContext;
 use super::types::MergeResult;
 
@@ -53,6 +53,9 @@ pub fn merge(
                 worktree_path.display()
             )
         })?;
+
+    // Capture mode BEFORE cleanup (cleanup removes the metadata)
+    let mode = get_worktree_mode(handle);
 
     debug!(
         name = name,
@@ -348,13 +351,14 @@ pub fn merge(
         no_hooks,
     )?;
 
-    // Navigate to the target branch window and close the source window
+    // Navigate to the target branch window/session and close the source
     cleanup::navigate_to_target_and_close(
         context.mux.as_ref(),
         &context.prefix,
         &target_window_name,
         handle,
         &cleanup_result,
+        mode,
     )?;
 
     Ok(MergeResult {

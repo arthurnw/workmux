@@ -242,6 +242,33 @@ impl Multiplexer for WezTermBackend {
         Ok(pane_id)
     }
 
+    fn create_session(&self, _params: CreateSessionParams) -> Result<String> {
+        Err(anyhow!(
+            "Session mode (--session) is not supported in WezTerm.\n\
+             WezTerm workspaces work differently from tmux sessions.\n\
+             Use the default window mode instead (omit --session flag)."
+        ))
+    }
+
+    fn switch_to_session(&self, _prefix: &str, _name: &str) -> Result<()> {
+        Err(anyhow!(
+            "Session mode is not supported in WezTerm.\n\
+             Use the default window mode instead."
+        ))
+    }
+
+    fn session_exists(&self, _full_name: &str) -> Result<bool> {
+        // WezTerm doesn't have persistent sessions like tmux.
+        // Workspaces are ephemeral and not queryable via CLI.
+        Ok(false)
+    }
+
+    fn kill_session(&self, _full_name: &str) -> Result<()> {
+        // WezTerm doesn't have persistent sessions to kill.
+        // Workspaces disappear when their last window closes.
+        Ok(())
+    }
+
     fn kill_window(&self, full_name: &str) -> Result<()> {
         let panes = self.list_panes()?;
         let current_ws = self.current_workspace();
@@ -302,6 +329,12 @@ impl Multiplexer for WezTermBackend {
         Ok(())
     }
 
+    fn schedule_session_close(&self, _full_name: &str, _delay: Duration) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "Session mode is not supported in WezTerm. Use window mode instead."
+        ))
+    }
+
     fn run_deferred_script(&self, script: &str) -> Result<()> {
         // Run the script in the background using nohup
         let bg_script = format!("nohup sh -c '{}' >/dev/null 2>&1 &", script);
@@ -350,6 +383,18 @@ impl Multiplexer for WezTermBackend {
             .collect::<Vec<_>>()
             .join("; ");
         Ok(kill_cmds)
+    }
+
+    fn shell_switch_session_cmd(&self, _full_name: &str) -> Result<String> {
+        Err(anyhow!(
+            "Session mode is not supported in WezTerm. Use window mode instead."
+        ))
+    }
+
+    fn shell_kill_session_cmd(&self, _full_name: &str) -> Result<String> {
+        Err(anyhow!(
+            "Session mode is not supported in WezTerm. Use window mode instead."
+        ))
     }
 
     fn select_window(&self, prefix: &str, name: &str) -> Result<()> {
@@ -417,6 +462,11 @@ impl Multiplexer for WezTermBackend {
         Ok(names)
     }
 
+    fn get_all_session_names(&self) -> Result<HashSet<String>> {
+        // WezTerm doesn't support session mode - return empty set
+        Ok(HashSet::new())
+    }
+
     fn filter_active_windows(&self, windows: &[String]) -> Result<Vec<String>> {
         let all_current = self.get_all_window_names()?;
 
@@ -474,6 +524,12 @@ impl Multiplexer for WezTermBackend {
         }
     }
 
+    fn wait_until_session_closed(&self, _full_session_name: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "Session mode is not supported in WezTerm. Use window mode instead."
+        ))
+    }
+
     // === Pane Management ===
 
     fn select_pane(&self, pane_id: &str) -> Result<()> {
@@ -484,7 +540,7 @@ impl Multiplexer for WezTermBackend {
         Ok(())
     }
 
-    fn switch_to_pane(&self, pane_id: &str) -> Result<()> {
+    fn switch_to_pane(&self, pane_id: &str, _window_hint: Option<&str>) -> Result<()> {
         // Check if we need to switch workspaces first
         let panes = self.list_panes()?;
         if let Some(target) = panes.iter().find(|p| p.pane_id.to_string() == pane_id) {
@@ -752,8 +808,7 @@ impl Multiplexer for WezTermBackend {
                             .run_and_capture_stdout()
                             .ok()
                     })
-                    .and_then(|output| output.trim().parse::<u32>().ok())
-                    .unwrap_or(0);
+                    .and_then(|output| output.trim().parse::<u32>().ok());
 
                 // Get foreground command (process with '+' in STAT indicates foreground)
                 // This is the actual running command (e.g., "claude", "vim", "zsh")
@@ -774,8 +829,7 @@ impl Multiplexer for WezTermBackend {
                             .ok()
                     })
                     .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "unknown".to_string());
+                    .filter(|s| !s.is_empty());
 
                 Ok(Some(LivePaneInfo {
                     pid,
@@ -827,8 +881,7 @@ impl Multiplexer for WezTermBackend {
                         .run_and_capture_stdout()
                         .ok()
                 })
-                .and_then(|output| output.trim().parse::<u32>().ok())
-                .unwrap_or(0);
+                .and_then(|output| output.trim().parse::<u32>().ok());
 
             let current_command = tty_name
                 .and_then(|tty| {
@@ -844,8 +897,7 @@ impl Multiplexer for WezTermBackend {
                         .ok()
                 })
                 .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "unknown".to_string());
+                .filter(|s| !s.is_empty());
 
             result.insert(
                 pane_id,

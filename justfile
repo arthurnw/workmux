@@ -11,6 +11,17 @@ default:
 [parallel]
 check: _rust-pipeline _python-pipeline docs-check
 
+# Run check and fail if there are uncommitted changes (for CI)
+check-ci: check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        echo "Error: check caused uncommitted changes"
+        echo "Run 'just check' locally and commit the results"
+        git diff --stat
+        exit 1
+    fi
+
 # Rust: format → clippy-fix → clippy → test (sequential)
 _rust-pipeline: format-rust clippy-fix clippy unit-tests
 
@@ -110,7 +121,7 @@ docs:
 
 # Format documentation files
 format-docs:
-    cd docs && npm install && npm run format
+    cd docs && npm run format
 
 # Release a new patch version
 release *ARGS:

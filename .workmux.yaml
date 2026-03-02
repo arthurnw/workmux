@@ -1,7 +1,8 @@
 panes:
   - command: <agent> # Start the configured agent (e.g., claude)
     focus: true
-  - split: horizontal # Second pane with default shell
+  - split: horizontal
+    command: '(cd docs && npm install)'
 
 # Commands run after worktree creation (blocks window creation, keep fast)
 post_create:
@@ -17,5 +18,5 @@ files:
     - history
 
 pre_merge:
-  - just check
+  - just check-ci
   - just test

@@ -4,7 +4,7 @@
 //! terminal multiplexer backends (tmux, WezTerm, Zellij).
 
 pub mod run;
-mod store;
+pub(crate) mod store;
 mod types;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -79,10 +79,12 @@ pub fn persist_agent_update(
         status: final_status,
         status_ts: Some(status_ts),
         pane_title,
-        pane_pid: live_info.pid,
-        command: live_info.current_command,
+        pane_pid: live_info.pid.unwrap_or(0),
+        command: live_info.current_command.unwrap_or_default(),
         updated_ts: now,
         restored: false,
+        window_name: live_info.window,
+        session_name: live_info.session,
     };
 
     if let Ok(store) = StateStore::new()

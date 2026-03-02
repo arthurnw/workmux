@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use std::collections::HashSet;
 
-use crate::config::{Config, SandboxBackend, SandboxRuntime};
+use crate::config::{Config, SandboxBackend};
 use crate::multiplexer;
 use crate::sandbox::build_docker_run_args;
 use crate::sandbox::ensure_sandbox_config_dirs;
@@ -168,9 +168,14 @@ fn run_lima(config: &Config, worktree: &Path, command: &[String]) -> Result<i32>
         info!(toolchain = ?detected, "wrapping command with toolchain environment");
     }
 
-    // Create host-exec shims (built-in commands like afplay + user-configured ones)
+    // Create shims (built-in commands like afplay, clipboard shims, + user-configured ones)
     let host_commands = shims::effective_host_commands(config.sandbox.host_commands());
-    let allowed_commands: HashSet<String> = host_commands.iter().cloned().collect();
+    // Clipboard shims use ClipboardRead RPC, not Exec -- exclude from exec allowlist
+    let allowed_commands: HashSet<String> = host_commands
+        .iter()
+        .filter(|cmd| !shims::is_clipboard_shim(cmd))
+        .cloned()
+        .collect();
 
     let state_dir = lima::mounts::lima_state_dir_path(&vm_name)?;
     shims::create_shim_directory(&state_dir, &host_commands)?;
@@ -265,9 +270,14 @@ fn run_container(
     // Ensure sandbox config dirs exist before building container args
     ensure_sandbox_config_dirs()?;
 
-    // Merge built-in host commands (e.g. afplay) with user-configured ones
+    // Merge built-in commands (e.g. afplay, clipboard shims) with user-configured ones
     let host_commands = shims::effective_host_commands(config.sandbox.host_commands());
-    let allowed_commands: HashSet<String> = host_commands.iter().cloned().collect();
+    // Clipboard shims use ClipboardRead RPC, not Exec -- exclude from exec allowlist
+    let allowed_commands: HashSet<String> = host_commands
+        .iter()
+        .filter(|cmd| !shims::is_clipboard_shim(cmd))
+        .cloned()
+        .collect();
 
     // Resolve toolchain for host-exec command wrapping (runs on host, not in container)
     let detected = toolchain::resolve_toolchain(&config.sandbox.toolchain(), worktree_root);
@@ -275,9 +285,18 @@ fn run_container(
         info!(toolchain = ?detected, "wrapping host-exec commands with toolchain environment");
     }
 
-    // Create shims directory for host-exec (on host, will be bind-mounted into container)
+    // Create shims directory for host-exec (on host, will be bind-mounted into container).
+    // Use ~/.cache/workmux/shims/ instead of system temp (/var/folders/... on macOS)
+    // so the path is inside ~ and accessible to VM-based runtimes like Colima.
     let _shim_dir = {
-        let dir = tempfile::tempdir().context("Failed to create shim temp dir")?;
+        let home = home::home_dir().context("Could not determine home directory")?;
+        let shims_base = home.join(".cache/workmux/shims");
+        std::fs::create_dir_all(&shims_base)
+            .with_context(|| format!("Failed to create {}", shims_base.display()))?;
+        let dir = tempfile::Builder::new()
+            .prefix("shims-")
+            .tempdir_in(&shims_base)
+            .context("Failed to create shim temp dir")?;
         shims::create_shim_directory(dir.path(), &host_commands)?;
         info!(commands = ?host_commands, "created host-exec shims");
         Some(dir)
@@ -308,10 +327,7 @@ fn run_container(
     // Compute RPC host BEFORE matching on runtime (SandboxRuntime is not Copy)
     let rpc_host = config.sandbox.resolved_rpc_host();
     let runtime = config.sandbox.runtime();
-    let runtime_bin: &'static str = match runtime {
-        SandboxRuntime::Podman => "podman",
-        SandboxRuntime::Docker => "docker",
-    };
+    let runtime_bin = runtime.binary_name();
 
     // Generate container name from worktree directory name so cleanup can find it.
     // Include PID to allow multiple agents in the same worktree (e.g., open -n).
@@ -324,7 +340,7 @@ fn run_container(
 
     // Register container in state store so cleanup can find it without docker ps
     if let Ok(store) = StateStore::new()
-        && let Err(e) = store.register_container(&handle, &container_name)
+        && let Err(e) = store.register_container(&handle, &container_name, &runtime)
     {
         warn!(error = %e, "failed to register container state");
     }

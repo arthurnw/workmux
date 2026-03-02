@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::config::MuxMode;
 use crate::github::PrSummary;
 use crate::multiplexer::AgentStatus;
 use crate::prompt::Prompt;
@@ -44,6 +45,7 @@ pub struct DeferredCleanup {
     pub worktree_path: PathBuf,
     pub trash_path: PathBuf,
     pub branch_name: String,
+    pub handle: String,
     pub keep_branch: bool,
     pub force: bool,
     pub git_common_dir: PathBuf,
@@ -83,6 +85,8 @@ pub struct SetupOptions {
     /// Pre-collected orphan state to carry forward (from drain_orphans).
     /// When set, skips runtime orphan lookup in write_initial_agent_state.
     pub prior_agent_state: Option<AgentState>,
+    /// Mode for tmux operations: window (default) or session
+    pub mode: MuxMode,
 }
 
 impl SetupOptions {
@@ -100,6 +104,7 @@ impl SetupOptions {
             open_if_exists: false,
             resume_session_id: None,
             prior_agent_state: None,
+            mode: MuxMode::default(),
         }
     }
 
@@ -116,6 +121,7 @@ impl SetupOptions {
             open_if_exists: false,
             resume_session_id: None,
             prior_agent_state: None,
+            mode: MuxMode::default(),
         }
     }
 
@@ -138,6 +144,7 @@ impl SetupOptions {
             open_if_exists: false,
             resume_session_id: None,
             prior_agent_state: None,
+            mode: MuxMode::default(),
         }
     }
 }

@@ -2,6 +2,7 @@
 description: Release notes and version history for workmux
 ---
 
+<!-- skipped: v0.1.121 -->
 <!-- skipped: v0.1.115 -->
 <!-- skipped: v0.1.113 -->
 <!-- skipped: v0.1.89 -->
@@ -15,6 +16,87 @@ description: Release notes and version history for workmux
 <!-- skipped: v0.1.8 -->
 
 # Changelog
+
+## v0.1.128 (2026-03-01)
+
+- Dashboard now renders colored status icons correctly instead of showing raw
+  tmux color codes as literal text
+  ([#66](https://github.com/raine/workmux/issues/66))
+
+## v0.1.127 (2026-02-28)
+
+- Sandbox: Images copied to the host clipboard can now be pasted into sandboxed
+  agents (Ctrl+V), enabling workflows like sharing screenshots with Claude Code
+  running inside a container or VM
+- Merge skill: Added `--no-verify` (`-n`) flag to skip pre-merge hooks, and `-k`
+  as a shorthand alias for `--keep`
+
+## v0.1.126 (2026-02-28)
+
+- Added `workmux update` command for self-updating workmux directly from GitHub
+  releases. Downloads the latest version, verifies checksums, and replaces the
+  binary in place. Homebrew-managed installs are detected and directed to use
+  `brew upgrade` instead
+- workmux now automatically checks for updates in the background and shows a
+  notification when a newer version is available. Checks happen at most once per
+  day during `workmux add`. Disable with `auto_update_check: false` in config or
+  by setting the `WORKMUX_NO_UPDATE_CHECK` environment variable
+
+## v0.1.125 (2026-02-28)
+
+- Added Apple Container as a sandbox runtime alongside Docker and Podman,
+  enabling sandboxing on macOS using Apple's native container technology (macOS
+  26+, Apple Silicon). Auto-detected when the `container` binary is available.
+  Configure with `runtime: apple-container` or let workmux detect it
+  automatically
+- Fixed `close` command not finding the correct worktree when using a branch
+  name that differs from the worktree handle (e.g., when created with `--name`)
+
+## v0.1.124 (2026-02-24)
+
+- Added experimental Zellij backend support. Zellij is auto-detected when
+  running inside a Zellij session. Requires Zellij built from source (uses
+  unreleased features). See the
+  [Zellij guide](https://workmux.raine.dev/guide/zellij) for details and known
+  limitations (contributed by [@Infonautica](https://github.com/Infonautica))
+
+## v0.1.123 (2026-02-24)
+
+- Add GitHub Copilot CLI as a supported agent for status tracking. Copilot hooks
+  are installed per-repository via `workmux setup`. Note: the waiting state is
+  not supported due to Copilot CLI hooks API limitations
+
+## v0.1.122 (2026-02-23)
+
+- Fork branch references (e.g., `someuser:feature`) now prefix the local branch
+  name with the fork owner (`someuser-feature`), preventing conflicts with
+  existing branches like `main`
+
+## v0.1.120 (2026-02-21)
+
+- Built-in agents (`claude`, `gemini`, `codex`, `opencode`) are now
+  auto-detected in pane commands, so prompt injection works without the
+  `<agent>` placeholder or a matching `agent` config. Just use the agent name
+  directly as the pane command (e.g., `command: "codex --yolo"`) and prompts are
+  delivered automatically. ([#57](https://github.com/raine/workmux/issues/57))
+
+## v0.1.119 (2026-02-21)
+
+- Added session mode: worktrees can now be created as their own tmux sessions
+  instead of windows, giving each worktree a separate window list, history, and
+  layout. Enable with `--session` flag or `mode: session` in config.
+- Added multi-window sessions: use the `windows` config to create multiple
+  windows per session, each with its own pane layout - useful for setups like an
+  editor window alongside a test runner
+
+## v0.1.118 (2026-02-19)
+
+- Added `workmux setup` command to automatically detect installed agents and
+  configure status tracking hooks, with a guided install prompt and a tmux
+  status bar preview showing what the icons look like
+- Fixed sandbox failing to start with Colima (Docker Desktop alternative for
+  macOS) due to shim directories being created in system temp paths that
+  Colima's VM cannot access
 
 ## v0.1.117 (2026-02-16)
 

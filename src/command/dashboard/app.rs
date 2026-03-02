@@ -1,7 +1,7 @@
 //! Application state and business logic for the dashboard TUI.
 
 use anyhow::Result;
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 use ratatui::widgets::TableState;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -385,6 +385,9 @@ impl App {
     /// Update the preview for the currently selected agent.
     /// Only fetches if the selection has changed or preview is stale.
     pub fn update_preview(&mut self) {
+        if !self.mux.supports_preview() {
+            return;
+        }
         let current_pane_id = self
             .table_state
             .selected()
@@ -404,6 +407,9 @@ impl App {
 
     /// Force refresh the preview (used on periodic refresh)
     pub fn refresh_preview(&mut self) {
+        if !self.mux.supports_preview() {
+            return;
+        }
         self.preview = self
             .preview_pane_id
             .as_ref()
@@ -555,11 +561,24 @@ impl App {
         let current_pane = self.mux.active_pane_id();
 
         // Attempt the switch first - only update state on success
-        if self.mux.switch_to_pane(target_pane_id).is_err() {
+        // Look up window_name for the target pane (needed by Zellij)
+        let window_hint = self
+            .agents
+            .iter()
+            .find(|a| a.pane_id == target_pane_id)
+            .map(|a| a.window_name.as_str());
+        if self
+            .mux
+            .switch_to_pane(target_pane_id, window_hint)
+            .is_err()
+        {
             return;
         }
 
-        self.should_jump = true;
+        // Exit dashboard after jump (or keep open, depending on multiplexer)
+        if self.mux.should_exit_on_jump() {
+            self.should_jump = true;
+        }
 
         // Only update last_pane_id if:
         // 1. We actually moved to a different pane
@@ -616,7 +635,9 @@ impl App {
         if let Some(selected) = self.table_state.selected()
             && let Some(agent) = self.agents.get(selected)
         {
-            let _ = self.mux.switch_to_pane(&agent.pane_id);
+            let _ = self
+                .mux
+                .switch_to_pane(&agent.pane_id, Some(&agent.window_name));
             // Don't set should_jump - popup stays open
         }
     }
@@ -672,7 +693,7 @@ impl App {
         agent::elapsed_secs(agent.status_ts, now)
     }
 
-    pub fn get_status_display(&self, agent: &AgentPane) -> (String, Color) {
+    pub fn get_status_display(&self, agent: &AgentPane) -> Vec<(String, Style)> {
         let is_stale = self.is_stale(agent);
 
         // Map status enum to icon and color
@@ -685,24 +706,33 @@ impl App {
             None => ("", self.palette.text, false),
         };
 
-        // If stale, dim the color and add timer-off indicator
+        let base_style = Style::default().fg(base_color);
+        let mut spans = super::ansi::parse_tmux_styles(icon, base_style);
+
         if is_stale {
-            let display_text = format!("{} \u{f051b}", icon);
-            (display_text, self.palette.dimmed)
+            // Override all styling for stale agents
+            let dimmed = Style::default().fg(self.palette.dimmed);
+            for span in &mut spans {
+                span.1 = dimmed;
+            }
+            spans.push((" \u{f051b}".to_string(), dimmed));
         } else if is_working {
             // Add animated spinner when agent is working
             let spinner = SPINNER_FRAMES[self.spinner_frame as usize];
-            let display_text = format!("{} {}", icon, spinner);
-            (display_text, base_color)
-        } else {
-            (icon.to_string(), base_color)
+            spans.push((format!(" {}", spinner), base_style));
         }
+
+        spans
     }
 
     /// Extract the worktree name from an agent.
     /// Returns (worktree_name, is_main) where is_main indicates if this is the main worktree.
     pub fn extract_worktree_name(&self, agent_pane: &AgentPane) -> (String, bool) {
-        agent::extract_worktree_name(&agent_pane.window_name, self.config.window_prefix())
+        agent::extract_worktree_name(
+            &agent_pane.session,
+            &agent_pane.window_name,
+            self.config.window_prefix(),
+        )
     }
 
     pub fn extract_project_name(agent_pane: &AgentPane) -> String {

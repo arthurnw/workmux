@@ -4,7 +4,9 @@ description: A workflow tool for managing git worktrees and tmux windows as isol
 
 # What is workmux?
 
-workmux is a giga opinionated zero-friction workflow tool for managing [git worktrees](https://git-scm.com/docs/git-worktree) and tmux windows as isolated development environments. Also supports [kitty](/guide/kitty) and [WezTerm](/guide/wezterm) (experimental). Perfect for running multiple AI agents in parallel without conflict.
+workmux is a giga opinionated zero-friction workflow tool for managing [git worktrees](https://git-scm.com/docs/git-worktree) and tmux windows as isolated development environments. Also supports [kitty](/guide/kitty), [WezTerm](/guide/wezterm), and [Zellij](/guide/zellij) (experimental). Perfect for running multiple AI agents in parallel without conflict.
+
+**Philosophy:** Do one thing well, then compose. Your terminal handles windowing and layout, git handles branches and worktrees, your agent executes, and workmux ties it all together.
 
 ::: tip New to workmux?
 Read the [introduction blog post](https://raine.dev/blog/introduction-to-workmux/) for a quick overview.
@@ -18,8 +20,11 @@ each with its own AI agent. No stashing, no branch switching, no conflicts.
 **One window per task.** A natural mental model. Each has its own terminal
 state, editor session, dev server, and AI agent. Context switching is switching tabs.
 
-**tmux is the interface.** For existing and new tmux users. If you already live
-in tmux, it fits your workflow. If you don't, [it's worth picking up](https://raine.dev/blog/my-tmux-setup/). Also supports [kitty](/guide/kitty) and [WezTerm](/guide/wezterm) as experimental alternatives.
+**Automated setup.** New worktrees start broken (no `.env`, no `node_modules`, no dev server). workmux can copy config files, symlink dependencies, and run install commands on creation. Configure once, reuse everywhere.
+
+**One-command cleanup.** `workmux merge` handles the full lifecycle: merge the branch, delete the worktree, close the tmux window, remove the local branch. Or go next level and use the [`/merge` skill](/guide/skills#merge) to let your agent commit, rebase, and merge autonomously.
+
+**Terminal workflow.** Build on your familiar terminal setup instead of yet another agentic GUI that won't exist next year. If you don't have one yet, [tmux is worth picking up](https://raine.dev/blog/my-tmux-setup/). Also supports [Kitty](/guide/kitty), [WezTerm](/guide/wezterm), and [Zellij](/guide/zellij).
 
 <div class="terminal-window">
   <div class="terminal-header">
@@ -117,7 +122,7 @@ in tmux, it fits your workflow. If you don't, [it's worth picking up](https://ra
 
 ## Features
 
-- Create git worktrees with matching tmux windows (or kitty/WezTerm tabs) in a single command (`add`)
+- Create git worktrees with matching tmux windows (or kitty/WezTerm/Zellij tabs) in a single command (`add`)
 - Merge branches and clean up everything (worktree, tmux window, branches) in one command (`merge`)
 - [Dashboard](/guide/dashboard/) for monitoring agents, reviewing changes, and sending commands
 - [Delegate tasks to worktree agents](/guide/skills#-worktree) with a `/worktree` skill
@@ -184,7 +189,7 @@ In a standard Git setup, switching branches disrupts your flow by requiring a cl
 ## Requirements
 
 - Git 2.5+ (for worktree support)
-- tmux (or [WezTerm](/guide/wezterm) or [kitty](/guide/kitty))
+- tmux (or [WezTerm](/guide/wezterm), [kitty](/guide/kitty), or [Zellij](/guide/zellij))
 
 ## Inspiration and related tools
 

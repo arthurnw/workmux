@@ -1,4 +1,6 @@
-use crate::multiplexer::{create_backend, detect_backend, util::prefixed};
+use crate::config::MuxMode;
+use crate::multiplexer::handle::mode_label;
+use crate::multiplexer::{MuxHandle, create_backend, detect_backend, util::prefixed};
 use crate::prompt::{Prompt, PromptDocument, foreach_from_frontmatter};
 use crate::spinner;
 use crate::template::{
@@ -113,6 +115,7 @@ pub fn run(
     rescue: RescueArgs,
     multi: MultiArgs,
     wait: bool,
+    session: bool,
 ) -> Result<()> {
     // Inside a sandbox guest, route through RPC to the host supervisor
     if crate::sandbox::guest::is_sandbox_guest() {
@@ -127,19 +130,29 @@ pub fn run(
             pr,
             name.as_deref(),
             wait,
+            session,
         );
     }
 
-    // Ensure preconditions are met (git repo and tmux session)
+    // Ensure preconditions are met (git repo and multiplexer session)
     check_preconditions()?;
 
     // Extract sandbox override before consuming setup flags
     let sandbox_override = setup.sandbox;
 
+    // Load config early to determine mode (CLI flag overrides config)
+    let initial_config = config::Config::load(multi.agent.first().map(|s| s.as_str()))?;
+    let mode = if session {
+        MuxMode::Session
+    } else {
+        initial_config.mode()
+    };
+
     // Construct setup options from flags
     let mut options = SetupOptions::new(!setup.no_hooks, !setup.no_file_ops, !setup.no_pane_cmds);
     options.focus_window = !setup.background;
     options.open_if_exists = setup.open_if_exists;
+    options.mode = mode;
 
     // If using --auto-name and config has auto_name.background = true, run in background
     if auto_name && options.focus_window {
@@ -386,6 +399,9 @@ fn handle_rescue_flow(
         return Ok(false);
     }
 
+    // Capture mode before options is moved
+    let mode = options.mode;
+
     let result = workflow::create_with_changes(
         branch_name,
         handle,
@@ -403,8 +419,7 @@ fn handle_rescue_flow(
     );
 
     if wait {
-        let full_window_name = prefixed(&context.prefix, handle);
-        context.mux.wait_until_windows_closed(&[full_window_name])?;
+        MuxHandle::new(context.mux.as_ref(), mode, &context.prefix, handle).wait_until_closed()?;
     }
 
     Ok(true)
@@ -510,20 +525,27 @@ impl<'a> CreationPlan<'a> {
         // Create backend once for all specs
         let mux = create_backend(detect_backend());
 
-        // Track windows for --wait (all created windows)
-        let mut created_windows = Vec::new();
-        // Track currently active windows for --max-concurrent
-        let mut active_windows: Vec<String> = Vec::new();
+        // Track targets for --wait (all created windows/sessions)
+        let mut created_targets = Vec::new();
+        // Track currently active targets for --max-concurrent
+        let mut active_targets: Vec<String> = Vec::new();
+        let mode = self.options.mode;
 
         for (i, spec) in self.specs.iter().enumerate() {
             // Concurrency control: wait for a slot if at limit
             if let Some(limit) = self.max_concurrent {
                 let limit = limit as usize;
                 // Only enter polling loop if we're at capacity
-                if active_windows.len() >= limit {
+                if active_targets.len() >= limit {
                     loop {
-                        active_windows = mux.filter_active_windows(&active_windows)?;
-                        if active_windows.len() < limit {
+                        // Filter to only targets that still exist
+                        if mode == MuxMode::Session {
+                            let live_sessions = mux.get_all_session_names()?;
+                            active_targets.retain(|t| live_sessions.contains(t));
+                        } else {
+                            active_targets = mux.filter_active_windows(&active_targets)?;
+                        }
+                        if active_targets.len() < limit {
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(WORKER_POOL_POLL_MS));
@@ -579,12 +601,12 @@ impl<'a> CreationPlan<'a> {
             let full_window_name = prefixed(&context.prefix, &handle);
 
             if self.wait {
-                created_windows.push(full_window_name.clone());
+                created_targets.push(full_window_name.clone());
             }
 
             // Track for concurrency control
             if self.max_concurrent.is_some() {
-                active_windows.push(full_window_name);
+                active_targets.push(full_window_name);
             }
 
             let result = workflow::create(
@@ -611,7 +633,8 @@ impl<'a> CreationPlan<'a> {
             }
 
             println!(
-                "✓ Successfully created worktree and tmux window for '{}'",
+                "✓ Successfully created worktree and tmux {} for '{}'",
+                mode_label(mode),
                 result.branch_name
             );
             if let Some(ref base) = result.base_branch {
@@ -620,8 +643,15 @@ impl<'a> CreationPlan<'a> {
             println!("  Worktree: {}", result.worktree_path.display());
         }
 
-        if self.wait && !created_windows.is_empty() {
-            mux.wait_until_windows_closed(&created_windows)?;
+        if self.wait && !created_targets.is_empty() {
+            if mode == MuxMode::Session {
+                // For sessions, wait for each one to close
+                for session_name in &created_targets {
+                    mux.wait_until_session_closed(session_name)?;
+                }
+            } else {
+                mux.wait_until_windows_closed(&created_targets)?;
+            }
         }
 
         Ok(())
@@ -644,6 +674,7 @@ fn run_add_via_rpc(
     pr: Option<u32>,
     name: Option<&str>,
     wait: bool,
+    session: bool,
 ) -> Result<()> {
     use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
     use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
@@ -674,6 +705,11 @@ fn run_add_via_rpc(
     }
     if multi.foreach.is_some() {
         bail!("--foreach is not supported from inside a sandbox");
+    }
+    if session {
+        bail!(
+            "--session is not supported from inside a sandbox (host controls mode via its config)"
+        );
     }
 
     // --- Resolve prompt via existing loader (handles -p, -P, -e) ---

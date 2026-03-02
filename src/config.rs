@@ -161,6 +161,18 @@ fn default_capture_timeout() -> u32 {
     30
 }
 
+/// Configuration for a single window within a session (session mode only)
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct WindowConfig {
+    /// Optional window name. If omitted, tmux auto-names based on running command.
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// Panes within this window. Same schema as top-level `panes`.
+    #[serde(default)]
+    pub panes: Option<Vec<PaneConfig>>,
+}
+
 /// Configuration for the workmux tool, read from .workmux.yaml
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct Config {
@@ -177,9 +189,13 @@ pub struct Config {
     #[serde(default)]
     pub window_prefix: Option<String>,
 
-    /// Tmux pane configuration
+    /// Tmux pane configuration (single window layout, mutually exclusive with `windows`)
     #[serde(default)]
     pub panes: Option<Vec<PaneConfig>>,
+
+    /// Multiple window configuration (session mode only, mutually exclusive with `panes`)
+    #[serde(default)]
+    pub windows: Option<Vec<WindowConfig>>,
 
     /// Commands to run after creating the worktree
     #[serde(default)]
@@ -250,6 +266,15 @@ pub struct Config {
     #[serde(default)]
     pub theme: Theme,
 
+    /// Mode for tmux operations: window (default) or session
+    /// None means "use default" (Window), Some means explicitly set
+    #[serde(default)]
+    pub mode: Option<MuxMode>,
+
+    /// Automatically check for updates in the background. Default: true
+    #[serde(default)]
+    pub auto_update_check: Option<bool>,
+
     /// Container sandbox configuration
     #[serde(default)]
     pub sandbox: SandboxConfig,
@@ -314,6 +339,17 @@ pub enum Theme {
     Light,
 }
 
+/// Mode for multiplexer operations: create windows within the current session or create new sessions
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MuxMode {
+    /// Create windows within the current tmux session (default)
+    #[default]
+    Window,
+    /// Create new tmux sessions for each worktree
+    Session,
+}
+
 /// Strategy for deriving worktree/window names from branch names
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -337,7 +373,7 @@ pub enum SandboxBackend {
 }
 
 /// Container runtime for sandbox
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxRuntime {
     /// Docker (default fallback when neither runtime is found in PATH)
@@ -345,22 +381,76 @@ pub enum SandboxRuntime {
     Docker,
     /// Podman
     Podman,
+    /// Apple Container (macOS only, uses `container` binary)
+    #[serde(rename = "apple-container")]
+    AppleContainer,
 }
 
 impl SandboxRuntime {
     /// Auto-detect container runtime by checking PATH.
     ///
-    /// Returns the first available runtime found in PATH, preferring docker over
-    /// podman. Falls back to Docker if neither is found (will fail later with a
-    /// clear "command not found" error).
+    /// On macOS, prefers Apple Container (`container`) over Docker/Podman.
+    /// The `container` probe is gated behind macOS since the generic binary name
+    /// could false-positive on Linux. Falls back to Docker if nothing is found
+    /// (will fail later with a clear "command not found" error).
     pub fn detect() -> Self {
+        #[cfg(target_os = "macos")]
+        if which("container").is_ok() {
+            return SandboxRuntime::AppleContainer;
+        }
+
         if which("docker").is_ok() {
             SandboxRuntime::Docker
         } else if which("podman").is_ok() {
             SandboxRuntime::Podman
         } else {
-            debug!("neither docker nor podman found in PATH, defaulting to docker");
+            debug!("no container runtime found in PATH, defaulting to docker");
             SandboxRuntime::Docker
+        }
+    }
+
+    /// Returns the binary name for this runtime.
+    pub fn binary_name(&self) -> &'static str {
+        match self {
+            SandboxRuntime::Docker => "docker",
+            SandboxRuntime::Podman => "podman",
+            SandboxRuntime::AppleContainer => "container",
+        }
+    }
+
+    /// Whether this runtime needs `--add-host host.docker.internal:host-gateway`.
+    /// Only Docker requires this.
+    pub fn needs_add_host(&self) -> bool {
+        matches!(self, SandboxRuntime::Docker)
+    }
+
+    /// Whether this runtime needs `--userns=keep-id`.
+    /// Only Podman requires this.
+    pub fn needs_userns_keep_id(&self) -> bool {
+        matches!(self, SandboxRuntime::Podman)
+    }
+
+    /// Whether this runtime needs `--cap-add=NET_ADMIN` and `--security-opt
+    /// no-new-privileges` in network deny mode. Apple Container runs each
+    /// container as a full VM where root already has all capabilities.
+    pub fn needs_deny_mode_caps(&self) -> bool {
+        matches!(self, SandboxRuntime::Docker | SandboxRuntime::Podman)
+    }
+
+    /// Whether this runtime supports binding individual files (not just directories).
+    /// Apple Container only supports directory mounts via virtiofs.
+    pub fn supports_file_mounts(&self) -> bool {
+        !matches!(self, SandboxRuntime::AppleContainer)
+    }
+
+    /// Returns the arguments for pulling an image.
+    /// Apple Container uses `image pull`, others use `pull`.
+    pub fn pull_args(&self, image: &str) -> Vec<String> {
+        match self {
+            SandboxRuntime::AppleContainer => {
+                vec!["image".into(), "pull".into(), image.into()]
+            }
+            _ => vec!["pull".into(), image.into()],
         }
     }
 
@@ -368,10 +458,31 @@ impl SandboxRuntime {
     ///
     /// - Docker: `host.docker.internal` (Docker Desktop built-in)
     /// - Podman: `host.containers.internal` (Podman built-in)
+    /// - Apple Container: `192.168.64.1` (default gateway for Apple VMs)
     pub fn rpc_host_address(&self) -> &'static str {
         match self {
             SandboxRuntime::Docker => "host.docker.internal",
             SandboxRuntime::Podman => "host.containers.internal",
+            SandboxRuntime::AppleContainer => "192.168.64.1",
+        }
+    }
+
+    /// Returns the serde name for this runtime (used for state store serialization).
+    pub fn serde_name(&self) -> &'static str {
+        match self {
+            SandboxRuntime::Docker => "docker",
+            SandboxRuntime::Podman => "podman",
+            SandboxRuntime::AppleContainer => "apple-container",
+        }
+    }
+
+    /// Parse a runtime from its serde name. Returns None for unrecognized values.
+    pub fn from_serde_name(s: &str) -> Option<Self> {
+        match s {
+            "docker" => Some(SandboxRuntime::Docker),
+            "podman" => Some(SandboxRuntime::Podman),
+            "apple-container" => Some(SandboxRuntime::AppleContainer),
+            _ => None,
         }
     }
 }
@@ -812,6 +923,7 @@ impl SandboxConfig {
             let home = home::home_dir()?;
             match agent {
                 "claude" => Some(home.join(".claude")),
+                "copilot" => Some(home.join(".copilot")),
                 "gemini" => Some(home.join(".gemini")),
                 "codex" => Some(home.join(".codex")),
                 "opencode" => Some(home.join(".local/share/opencode")),
@@ -919,6 +1031,26 @@ impl WorktreeNaming {
     }
 }
 
+/// Validate windows configuration
+pub fn validate_windows_config(windows: &[WindowConfig]) -> anyhow::Result<()> {
+    if windows.is_empty() {
+        anyhow::bail!("'windows' list must not be empty.");
+    }
+    for (i, window) in windows.iter().enumerate() {
+        if let Some(panes) = &window.panes {
+            validate_panes_config(panes).map_err(|e| {
+                anyhow::anyhow!(
+                    "Window {} ({}): {}",
+                    i,
+                    window.name.as_deref().unwrap_or("unnamed"),
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Validate pane configuration
 pub fn validate_panes_config(panes: &[PaneConfig]) -> anyhow::Result<()> {
     for (i, pane) in panes.iter().enumerate() {
@@ -1009,8 +1141,8 @@ impl Config {
                 || repo_root.join("package-lock.json").exists()
                 || repo_root.join("yarn.lock").exists();
 
-            // Default panes based on project type
-            if config.panes.is_none() {
+            // Default panes based on project type (only when windows is not set)
+            if config.panes.is_none() && config.windows.is_none() {
                 if repo_root.join("CLAUDE.md").exists() {
                     config.panes = Some(Self::claude_default_panes());
                 } else {
@@ -1024,7 +1156,7 @@ impl Config {
             }
         } else {
             // Apply fallback defaults for when not in a git repo (e.g., `workmux init`).
-            if config.panes.is_none() {
+            if config.panes.is_none() && config.windows.is_none() {
                 config.panes = Some(Self::default_panes());
             }
         }
@@ -1034,6 +1166,7 @@ impl Config {
         debug!(
             agent = ?config.agent,
             panes = config.panes.as_ref().map_or(0, |p| p.len()),
+            windows = config.windows.as_ref().map_or(0, |w| w.len()),
             "config:loaded"
         );
         Ok(config)
@@ -1070,7 +1203,7 @@ impl Config {
                 || defaults_root.join("package-lock.json").exists()
                 || defaults_root.join("yarn.lock").exists();
 
-            if config.panes.is_none() {
+            if config.panes.is_none() && config.windows.is_none() {
                 if defaults_root.join("CLAUDE.md").exists() {
                     config.panes = Some(Self::claude_default_panes());
                 } else {
@@ -1081,7 +1214,7 @@ impl Config {
             if config.pre_remove.is_none() && has_node_modules {
                 config.pre_remove = Some(vec![NODE_MODULES_CLEANUP_SCRIPT.to_string()]);
             }
-        } else if config.panes.is_none() {
+        } else if config.panes.is_none() && config.windows.is_none() {
             config.panes = Some(Self::default_panes());
         }
 
@@ -1090,6 +1223,7 @@ impl Config {
         debug!(
             agent = ?config.agent,
             panes = config.panes.as_ref().map_or(0, |p| p.len()),
+            windows = config.windows.as_ref().map_or(0, |w| w.len()),
             has_location = location.is_some(),
             "config:loaded with location"
         );
@@ -1177,6 +1311,9 @@ impl Config {
             }
         }
 
+        // Track which layout type the project config specified
+        let project_has_windows = project.windows.is_some();
+
         /// Macro to merge Option fields where project overrides global.
         /// Reduces boilerplate for simple `project.field.or(self.field)` patterns.
         macro_rules! merge_options {
@@ -1200,10 +1337,23 @@ impl Config {
             auto_message,
             worktree_prefix,
             panes,
+            windows,
             status_format,
             auto_name,
             nerdfont,
+            auto_update_check,
         );
+
+        // windows and panes are mutually exclusive: project layout choice wins entirely
+        if merged.windows.is_some() && merged.panes.is_some() {
+            // If project set windows, clear panes (project intended multi-window)
+            // If project set panes, clear windows (project intended single-window)
+            if project_has_windows {
+                merged.panes = None;
+            } else {
+                merged.windows = None;
+            }
+        }
 
         // Special case: worktree_naming (project wins if not default)
         merged.worktree_naming = if project.worktree_naming != WorktreeNaming::default() {
@@ -1218,6 +1368,9 @@ impl Config {
         } else {
             self.theme
         };
+
+        // Special case: mode (project wins if explicitly set)
+        merged.mode = project.mode.or(self.mode);
 
         // List values with "<global>" placeholder support
         merged.post_create = merge_vec_with_placeholder(self.post_create, project.post_create);
@@ -1450,6 +1603,12 @@ impl Config {
         }
     }
 
+    /// Get the mode (window or session).
+    /// Returns the configured value or defaults to Window.
+    pub fn mode(&self) -> MuxMode {
+        self.mode.unwrap_or(MuxMode::Window)
+    }
+
     /// Create an example .workmux.yaml configuration file
     pub fn init() -> anyhow::Result<()> {
         use std::path::PathBuf;
@@ -1515,7 +1674,12 @@ impl Config {
 # Tmux
 #-------------------------------------------------------------------------------
 
-# Custom tmux pane layout.
+# Mode for tmux operations: window (default) or session.
+# - window: Create windows within the current tmux session
+# - session: Create new tmux sessions for each worktree (useful for session-per-project workflows)
+# mode: session
+
+# Custom tmux pane layout (mutually exclusive with 'windows').
 # Default: Two-pane layout with shell and clear command.
 # panes:
 #   - command: pnpm install
@@ -1524,6 +1688,22 @@ impl Config {
 #   - command: clear
 #     split: vertical
 #     size: 5
+
+# Multiple windows per session (session mode only, mutually exclusive with 'panes').
+# Each window can have its own pane layout. Unnamed windows get tmux's
+# automatic naming based on the running command.
+# windows:
+#   - name: editor
+#     panes:
+#       - command: <agent>
+#         focus: true
+#       - split: horizontal
+#         size: 20
+#   - name: tests
+#     panes:
+#       - command: just test --watch
+#   - panes:
+#       - command: tail -f app.log
 
 # Auto-apply agent status icons to tmux window format.
 # Default: true
@@ -1645,7 +1825,7 @@ impl Config {
 #   backend: lima
 #   # host_commands: ["just", "cargo", "npm"]
 #   # container:
-#   #   runtime: docker
+#   #   runtime: docker          # docker | podman | apple-container
 #   # lima:
 #   #   isolation: project
 #   #   cpus: 4
@@ -2908,5 +3088,289 @@ network:
         let config: SandboxConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.network.policy(), NetworkPolicy::Deny);
         assert_eq!(config.network.allowed_domains().len(), 2);
+    }
+
+    // --- WindowConfig tests ---
+
+    use super::{WindowConfig, validate_windows_config};
+
+    #[test]
+    fn parse_windows_config_named() {
+        let yaml = r#"
+windows:
+  - name: editor
+    panes:
+      - command: <agent>
+        focus: true
+      - split: horizontal
+        size: 20
+  - name: tests
+    panes:
+      - command: just test --watch
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let windows = config.windows.unwrap();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].name.as_deref(), Some("editor"));
+        assert_eq!(windows[0].panes.as_ref().unwrap().len(), 2);
+        assert_eq!(windows[1].name.as_deref(), Some("tests"));
+        assert_eq!(windows[1].panes.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_windows_config_unnamed() {
+        let yaml = r#"
+windows:
+  - panes:
+      - command: tail -f app.log
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let windows = config.windows.unwrap();
+        assert_eq!(windows.len(), 1);
+        assert!(windows[0].name.is_none());
+    }
+
+    #[test]
+    fn parse_windows_config_mixed() {
+        let yaml = r#"
+windows:
+  - name: editor
+    panes:
+      - command: <agent>
+        focus: true
+  - panes:
+      - command: tail -f app.log
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let windows = config.windows.unwrap();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].name.as_deref(), Some("editor"));
+        assert!(windows[1].name.is_none());
+    }
+
+    #[test]
+    fn validate_windows_config_empty_errors() {
+        let result = validate_windows_config(&[]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
+    }
+
+    #[test]
+    fn validate_windows_config_valid() {
+        let windows = vec![
+            WindowConfig {
+                name: Some("editor".to_string()),
+                panes: Some(vec![super::PaneConfig {
+                    command: Some("<agent>".to_string()),
+                    focus: true,
+                    split: None,
+                    size: None,
+                    percentage: None,
+                    target: None,
+                }]),
+            },
+            WindowConfig {
+                name: None,
+                panes: Some(vec![super::PaneConfig {
+                    command: Some("tail -f app.log".to_string()),
+                    focus: false,
+                    split: None,
+                    size: None,
+                    percentage: None,
+                    target: None,
+                }]),
+            },
+        ];
+        assert!(validate_windows_config(&windows).is_ok());
+    }
+
+    #[test]
+    fn validate_windows_config_bad_pane_errors() {
+        let windows = vec![WindowConfig {
+            name: Some("bad".to_string()),
+            panes: Some(vec![super::PaneConfig {
+                command: None,
+                focus: false,
+                split: Some(super::SplitDirection::Horizontal), // first pane cannot have split
+                size: None,
+                percentage: None,
+                target: None,
+            }]),
+        }];
+        let result = validate_windows_config(&windows);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Window 0"));
+    }
+
+    #[test]
+    fn merge_project_windows_overrides_global_panes() {
+        let global = Config {
+            panes: Some(vec![super::PaneConfig {
+                command: Some("vim".to_string()),
+                focus: true,
+                split: None,
+                size: None,
+                percentage: None,
+                target: None,
+            }]),
+            ..Default::default()
+        };
+        let project = Config {
+            windows: Some(vec![
+                WindowConfig {
+                    name: Some("editor".to_string()),
+                    panes: None,
+                },
+                WindowConfig {
+                    name: Some("tests".to_string()),
+                    panes: None,
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        // Project windows should win, panes should be cleared
+        assert!(merged.windows.is_some());
+        assert!(merged.panes.is_none());
+        assert_eq!(merged.windows.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn merge_project_panes_overrides_global_windows() {
+        let global = Config {
+            windows: Some(vec![WindowConfig {
+                name: Some("global-window".to_string()),
+                panes: None,
+            }]),
+            ..Default::default()
+        };
+        let project = Config {
+            panes: Some(vec![super::PaneConfig {
+                command: Some("vim".to_string()),
+                focus: true,
+                split: None,
+                size: None,
+                percentage: None,
+                target: None,
+            }]),
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        // Project panes should win, windows should be cleared
+        assert!(merged.panes.is_some());
+        assert!(merged.windows.is_none());
+    }
+
+    #[test]
+    fn merge_global_windows_inherited_when_no_project_layout() {
+        let global = Config {
+            windows: Some(vec![WindowConfig {
+                name: Some("global-window".to_string()),
+                panes: None,
+            }]),
+            ..Default::default()
+        };
+        let project = Config::default(); // no panes or windows
+
+        let merged = global.merge(project);
+        assert!(merged.windows.is_some());
+        assert!(merged.panes.is_none());
+    }
+
+    #[test]
+    fn parse_runtime_apple_container() {
+        let yaml = r#"
+sandbox:
+  container:
+    runtime: apple-container
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.sandbox.container.runtime,
+            Some(SandboxRuntime::AppleContainer)
+        );
+    }
+
+    #[test]
+    fn runtime_binary_names() {
+        assert_eq!(SandboxRuntime::Docker.binary_name(), "docker");
+        assert_eq!(SandboxRuntime::Podman.binary_name(), "podman");
+        assert_eq!(SandboxRuntime::AppleContainer.binary_name(), "container");
+    }
+
+    #[test]
+    fn runtime_rpc_host_addresses() {
+        assert_eq!(
+            SandboxRuntime::Docker.rpc_host_address(),
+            "host.docker.internal"
+        );
+        assert_eq!(
+            SandboxRuntime::Podman.rpc_host_address(),
+            "host.containers.internal"
+        );
+        assert_eq!(
+            SandboxRuntime::AppleContainer.rpc_host_address(),
+            "192.168.64.1"
+        );
+    }
+
+    #[test]
+    fn runtime_capability_flags() {
+        // needs_add_host: only Docker
+        assert!(SandboxRuntime::Docker.needs_add_host());
+        assert!(!SandboxRuntime::Podman.needs_add_host());
+        assert!(!SandboxRuntime::AppleContainer.needs_add_host());
+
+        // needs_userns_keep_id: only Podman
+        assert!(!SandboxRuntime::Docker.needs_userns_keep_id());
+        assert!(SandboxRuntime::Podman.needs_userns_keep_id());
+        assert!(!SandboxRuntime::AppleContainer.needs_userns_keep_id());
+
+        // needs_deny_mode_caps: Docker and Podman, not Apple Container
+        assert!(SandboxRuntime::Docker.needs_deny_mode_caps());
+        assert!(SandboxRuntime::Podman.needs_deny_mode_caps());
+        assert!(!SandboxRuntime::AppleContainer.needs_deny_mode_caps());
+    }
+
+    #[test]
+    fn runtime_pull_args() {
+        assert_eq!(
+            SandboxRuntime::Docker.pull_args("img:latest"),
+            vec!["pull", "img:latest"]
+        );
+        assert_eq!(
+            SandboxRuntime::Podman.pull_args("img:latest"),
+            vec!["pull", "img:latest"]
+        );
+        assert_eq!(
+            SandboxRuntime::AppleContainer.pull_args("img:latest"),
+            vec!["image", "pull", "img:latest"]
+        );
+    }
+
+    #[test]
+    fn runtime_serde_name_roundtrip() {
+        for runtime in [
+            SandboxRuntime::Docker,
+            SandboxRuntime::Podman,
+            SandboxRuntime::AppleContainer,
+        ] {
+            let name = runtime.serde_name();
+            let parsed = SandboxRuntime::from_serde_name(name).unwrap();
+            assert_eq!(parsed, runtime);
+        }
+    }
+
+    #[test]
+    fn runtime_from_serde_name_unknown() {
+        assert_eq!(SandboxRuntime::from_serde_name("unknown"), None);
+        assert_eq!(SandboxRuntime::from_serde_name(""), None);
     }
 }

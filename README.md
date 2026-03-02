@@ -24,8 +24,11 @@ Giga opinionated zero-friction workflow tool for managing
 isolated development environments. Perfect for running multiple AI agents in
 parallel without conflict.
 
-\*Also supports [kitty](https://workmux.raine.dev/guide/kitty) and
-[WezTerm](https://workmux.raine.dev/guide/wezterm) as alternative backends.
+**Philosophy:** Do one thing well, then compose. Your terminal handles windowing
+and layout, git handles branches and worktrees, your agent executes, and workmux
+ties it all together.
+
+<sup><sub>\* Also supports <a href="https://workmux.raine.dev/guide/kitty">kitty</a>, <a href="https://workmux.raine.dev/guide/wezterm">WezTerm</a>, and <a href="https://workmux.raine.dev/guide/zellij">Zellij</a> as alternative backends.</sub></sup>
 
 📚 See the [full documentation](https://workmux.raine.dev/guide/) for guides and
 configuration reference.
@@ -49,8 +52,16 @@ each with its own AI agent. No stashing, no branch switching, no conflicts.
 state, editor session, dev server, and AI agent. Context switching is switching
 tabs.
 
-**tmux is the interface.** For existing and new tmux users. If you already live
-in tmux, it fits your workflow. If you don't, it's worth picking up.
+**Automated setup.** New worktrees start broken (no `.env`, no `node_modules`,
+no dev server). workmux can copy config files, symlink dependencies, and run
+install commands on creation. Configure once, reuse everywhere.
+
+**One-command cleanup.** `workmux merge` handles the full lifecycle: merge the
+branch, delete the worktree, close the tmux window, remove the local branch.
+
+**Terminal workflow.** Build on your familiar terminal setup instead of yet
+another agentic GUI that won't exist next year. If you don't have one yet,
+tmux is worth picking up.
 
 New to worktrees? See [Why git worktrees?](#why-git-worktrees)
 
@@ -131,6 +142,16 @@ For manual installation, see
 
 ## Quick start
 
+<!-- prettier-ignore -->
+> [!NOTE]
+> workmux requires a terminal multiplexer. Make sure you have
+> [tmux](https://github.com/tmux/tmux) (or
+> [WezTerm](https://raine.github.io/workmux/guide/wezterm) /
+> [Kitty](https://raine.github.io/workmux/guide/kitty) /
+> [Zellij](https://raine.github.io/workmux/guide/zellij)) installed and running
+> before you start. See [My tmux setup](https://raine.dev/blog/my-tmux-setup/)
+> if you need a starting point.
+
 1. **Initialize configuration (optional)**:
 
    ```bash
@@ -150,6 +171,9 @@ For manual installation, see
    This will:
    - Create a git worktree at
      `<project_root>/../<project_name>__worktrees/new-feature`
+   - Copy config files and symlink dependencies (if
+     [configured](#file-operations))
+   - Run any [`post_create`](#lifecycle-hooks) setup commands
    - Create a tmux window named `wm-new-feature` (the prefix is configurable)
    - Set up your configured or the default tmux pane layout
    - Automatically switch your tmux client to the new window
@@ -233,7 +257,8 @@ customize.
 | ---------------- | ---------------------------------------------------- | ----------------------- |
 | `main_branch`    | Branch to merge into                                 | Auto-detected           |
 | `worktree_dir`   | Directory for worktrees (absolute or relative)       | `<project>__worktrees/` |
-| `window_prefix`  | Prefix for tmux window names                         | `wm-`                   |
+| `window_prefix`  | Prefix for tmux window/session names                 | `wm-`                   |
+| `mode`           | Tmux mode (`window` or `session`)                    | `window`                |
 | `agent`          | Default agent for `<agent>` placeholder              | `claude`                |
 | `merge_strategy` | Default merge strategy (`merge`, `rebase`, `squash`) | `merge`                 |
 | `theme`          | Dashboard color theme (`dark`, `light`)              | `dark`                  |
@@ -253,7 +278,9 @@ customize.
 
 #### Panes
 
-Define your tmux pane layout with the `panes` array:
+Define your tmux pane layout with the `panes` array. For multiple windows in
+session mode, use [`windows`](#multiple-windows-per-session) instead (they are
+mutually exclusive).
 
 ```yaml
 panes:
@@ -266,39 +293,56 @@ panes:
 
 Each pane supports:
 
-| Option       | Description                                         | Default |
-| ------------ | --------------------------------------------------- | ------- |
-| `command`    | Command to run (use `<agent>` for configured agent) | Shell   |
-| `focus`      | Whether this pane receives focus                    | `false` |
-| `split`      | Split direction (`horizontal` or `vertical`)        | —       |
-| `size`       | Absolute size in lines/cells                        | 50%     |
-| `percentage` | Size as percentage (1-100)                          | 50%     |
+| Option       | Description                                                    | Default |
+| ------------ | -------------------------------------------------------------- | ------- |
+| `command`    | Command to run (see [agent placeholders](#agent-placeholders)) | Shell   |
+| `focus`      | Whether this pane receives focus                               | `false` |
+| `split`      | Split direction (`horizontal` or `vertical`)                   | —       |
+| `size`       | Absolute size in lines/cells                                   | 50%     |
+| `percentage` | Size as percentage (1-100)                                     | 50%     |
 
-**Note**: The `<agent>` placeholder must be the entire command value to be
-substituted. To add extra flags, either include them in the `agent` config
-(e.g., `agent: "claude --verbose"`) or use the literal command name (e.g.,
-`command: "claude --verbose"`).
+##### Agent placeholders
+
+- `<agent>`: resolves to the configured agent (from `agent` config or
+  `--agent` flag)
+
+Built-in agents (`claude`, `gemini`, `codex`, `opencode`) are auto-detected when
+used as literal commands and receive prompt injection automatically, without
+needing the `<agent>` placeholder or a matching `agent` config:
+
+```yaml
+panes:
+  - command: 'claude --dangerously-skip-permissions'
+    focus: true
+  - command: 'codex --yolo'
+    split: vertical
+```
+
+Each agent receives the prompt (via `-p`/`-P`/`-e`) using the correct format for
+that agent. Auto-detection matches the executable name regardless of flags or
+path.
 
 #### File operations
 
-Copy or symlink files into new worktrees:
+New worktrees are clean checkouts with no gitignored files (`.env`,
+`node_modules`, etc.). Use `files` to automatically copy or symlink what each
+worktree needs:
 
 ```yaml
 files:
   copy:
     - .env
   symlink:
-    - node_modules
-    - .pnpm-store
+    - .next/cache # Share build cache across worktrees
 ```
 
 Both `copy` and `symlink` accept glob patterns.
 
 #### Lifecycle hooks
 
-Run commands at specific points in the worktree lifecycle. All hooks run with
-the **worktree directory** as the working directory (or the nested config
-directory for
+Run commands at specific points in the worktree lifecycle, such as installing
+dependencies or running database migrations. All hooks run with the **worktree
+directory** as the working directory (or the nested config directory for
 [nested configs](https://workmux.raine.dev/guide/monorepos#nested-configuration))
 and receive environment variables: `WM_HANDLE`, `WM_WORKTREE_PATH`,
 `WM_PROJECT_ROOT`, `WM_CONFIG_DIR`.
@@ -488,7 +532,9 @@ immediately. If the branch doesn't exist, it will be created automatically.
 - `<branch-name>`: Name of the branch to create or switch to, a remote branch
   reference (e.g., `origin/feature-branch`), or a GitHub fork reference (e.g.,
   `user:branch`). Remote and fork references are automatically fetched and
-  create a local branch with the derived name. Optional when using `--pr`.
+  create a local branch with the derived name. Fork references derive the local
+  branch as `user-branch` (e.g., `someuser:feature` creates local branch
+  `someuser-feature`). Optional when using `--pr`.
 
 #### Options
 
@@ -532,6 +578,8 @@ immediately. If the branch doesn't exist, it will be created automatically.
 - `-o, --open-if-exists`: If a worktree for the branch already exists, open it
   instead of failing. Similar to `tmux new-session -A`. Useful when you don't
   know or care whether the worktree already exists.
+- `-s, --session`: Create a tmux session instead of a window. See
+  [Session mode](#session-mode) for details.
 
 #### Skip options
 
@@ -599,6 +647,7 @@ workmux add --pr 123
 workmux add fix/api-bug --pr 456
 
 # Checkout a fork branch using GitHub's owner:branch format (copy from GitHub UI)
+# Creates local branch "someuser-feature-branch" tracking the fork
 workmux add someuser:feature-branch
 ```
 
@@ -1516,14 +1565,14 @@ Commands for managing sandbox functionality. See the
 [sandbox guide](https://workmux.raine.dev/guide/sandbox/) for full
 documentation.
 
-| Command             | Description                                              |
-| ------------------- | -------------------------------------------------------- |
-| `sandbox pull`      | Pull the latest container image from the registry        |
-| `sandbox build`     | Build the container image locally                        |
-| `sandbox shell`     | Start an interactive shell inside a sandbox              |
-| `sandbox agent`     | Run the configured agent in a sandbox with RPC support   |
-| `sandbox stop`      | Stop running Lima VMs                                    |
-| `sandbox prune`     | Delete unused Lima VMs to reclaim disk space             |
+| Command               | Description                                            |
+| --------------------- | ------------------------------------------------------ |
+| `sandbox pull`        | Pull the latest container image from the registry      |
+| `sandbox build`       | Build the container image locally                      |
+| `sandbox shell`       | Start an interactive shell inside a sandbox            |
+| `sandbox agent`       | Run the configured agent in a sandbox with RPC support |
+| `sandbox stop`        | Stop running Lima VMs                                  |
+| `sandbox prune`       | Delete unused Lima VMs to reclaim disk space           |
 | `sandbox install-dev` | Cross-compile and install workmux into sandboxes (dev) |
 
 ---
@@ -1629,30 +1678,57 @@ at-a-glance visibility into what the agent in each window doing.
 - 💬 = agent is waiting for user input
 - ✅ = agent finished (auto-clears on window focus)
 
-**Note**: Currently Claude Code and [OpenCode](https://opencode.ai/) support
-hooks that enable this functionality. Gemini's support is
+**Note**: Currently Claude Code, [OpenCode](https://opencode.ai/), and
+[Copilot CLI](https://github.com/github/copilot-cli) support hooks that enable
+this functionality.
+Gemini's support is
 [on the way](https://github.com/google-gemini/gemini-cli/issues/9070). Codex
 support can be tracked in
 [this issue](https://github.com/openai/codex/issues/2109).
 
 ### Setup
 
-#### Claude Code
+Run `workmux setup` to automatically detect your agent CLIs and install status
+tracking hooks:
 
-Install the workmux status plugin in Claude Code:
+```bash
+workmux setup
+```
+
+Workmux will also prompt you on first run if it detects an agent without status
+tracking configured.
+
+Workmux automatically modifies your tmux `window-status-format` to display the
+status icons. This happens once per session and only affects the current tmux
+session (not your global config).
+
+#### Manual setup
+
+If you prefer manual setup:
+
+**Claude Code**: install the workmux status plugin:
 
 ```
 claude plugin marketplace add raine/workmux
 claude plugin install workmux-status
 ```
 
-Alternatively, you can manually add the hooks to `~/.claude/settings.json`. See
+Or manually add the hooks to `~/.claude/settings.json`. See
 [.claude-plugin/plugin.json](.claude-plugin/plugin.json) for the hook
 configuration.
 
-#### OpenCode
+**Copilot CLI**: copy the hooks to your repository:
 
-Download the workmux status plugin to your global OpenCode plugin directory:
+```bash
+mkdir -p .github/hooks/workmux-status
+curl -o .github/hooks/workmux-status/hooks.json \
+  https://raw.githubusercontent.com/raine/workmux/main/.github/hooks/workmux-status/hooks.json
+```
+
+Note: Copilot hooks are per-repository. The waiting state is not supported due
+to limitations in the Copilot CLI hooks implementation.
+
+**OpenCode**: download the workmux status plugin:
 
 ```bash
 mkdir -p ~/.config/opencode/plugin
@@ -1661,12 +1737,6 @@ curl -o ~/.config/opencode/plugin/workmux-status.ts \
 ```
 
 Restart OpenCode for the plugin to take effect.
-
----
-
-Workmux automatically modifies your tmux `window-status-format` to display the
-status icons. This happens once per session and only affects the current tmux
-session (not your global config).
 
 ### Customization
 
@@ -1730,9 +1800,10 @@ Then press `prefix + Tab` to toggle between your two most recent agents.
 
 ## Sandbox
 
-workmux can run agents inside containers (Docker/Podman) or Lima VMs, isolating
-them from your host. Agents are restricted to the project worktree; sensitive
-files like SSH keys, AWS credentials, and other secrets are not accessible. This
+workmux can run agents inside containers (Docker/Podman/Apple Container) or Lima
+VMs, isolating them from your host. Agents are restricted to the project
+worktree; sensitive files like SSH keys, AWS credentials, and other secrets are
+not accessible. This
 lets you run agents with `--dangerously-skip-permissions` without worrying about
 what they might touch on your host.
 
@@ -1741,12 +1812,12 @@ agents, and merging all continue to work normally across the sandbox boundary.
 
 ### Backends
 
-|                      | Container (Docker/Podman)                 | Lima VM                              |
-| -------------------- | ----------------------------------------- | ------------------------------------ |
-| **Isolation**        | Process-level (namespaces)                | Machine-level (virtual machine)      |
-| **Persistence**      | Ephemeral (new container per session)     | Persistent (stateful VMs)            |
-| **Toolchain**        | Custom Dockerfile or host command proxying | Built-in Nix & Devbox support       |
-| **Network**          | Optional restrictions (domain allowlist)  | Unrestricted                         |
+|                 | Container (Docker/Podman/Apple Container)  | Lima VM                         |
+| --------------- | ------------------------------------------ | ------------------------------- |
+| **Isolation**   | Process/VM-level                           | Machine-level (virtual machine) |
+| **Persistence** | Ephemeral (new container per session)      | Persistent (stateful VMs)       |
+| **Toolchain**   | Custom Dockerfile or host command proxying | Built-in Nix & Devbox support   |
+| **Network**     | Optional restrictions (domain allowlist)   | Unrestricted                    |
 
 Container is a good default: simple to set up and ephemeral, so no state
 accumulates between sessions. Choose Lima if you want persistent VMs with
@@ -1761,8 +1832,8 @@ sandbox:
   # backend: lima  # uncomment for Lima VMs (default: container)
 ```
 
-The pre-built container image is pulled automatically on first run. For Lima, the
-VM is created and provisioned on first use.
+The pre-built container image is pulled automatically on first run. For Lima,
+the VM is created and provisioned on first use.
 
 ### Shared features
 
@@ -1775,11 +1846,79 @@ Both backends support:
 - **Git identity**: Your `user.name` and `user.email` are automatically injected
   so git commits work without exposing your full `~/.gitconfig`
 - **Credential sharing**: Agent credentials are shared between host and sandbox
-- **Network restrictions** (container only): Block outbound connections except to
-  approved domains
+- **Network restrictions** (container only): Block outbound connections except
+  to approved domains
 
 See the [sandbox guide](https://workmux.raine.dev/guide/sandbox/) for full
 setup, configuration, and security details.
+
+## Session mode
+
+By default, workmux creates tmux **windows** within your current session. With
+session mode, each worktree gets its own **tmux session** instead. This allows
+each worktree to have multiple windows.
+
+### Enabling session mode
+
+Add to your config:
+
+```yaml
+# ~/.config/workmux/config.yaml or .workmux.yaml
+mode: session
+```
+
+Or use the `--session` flag:
+
+```bash
+workmux add feature-branch --session
+```
+
+### How it works
+
+- **Persistence**: The mode is stored per-worktree. If you create a worktree
+  with `--session`, subsequent `open`/`close`/`remove` commands automatically
+  use session mode for that worktree.
+- **Navigation**: After `merge` or `remove`, workmux switches you back to the
+  previous session.
+
+### Multiple windows per session
+
+Use the `windows` config to launch multiple windows in each session. Each window
+can have its own pane layout. This is mutually exclusive with the top-level
+`panes` config.
+
+```yaml
+mode: session
+windows:
+  - name: editor
+    panes:
+      - command: <agent>
+        focus: true
+      - split: horizontal
+        size: 20
+  - name: tests
+    panes:
+      - command: just test --watch
+  - panes:
+      - command: tail -f app.log
+```
+
+Each window supports:
+
+| Option  | Description                                            | Default      |
+| ------- | ------------------------------------------------------ | ------------ |
+| `name`  | Window name (if omitted, tmux auto-names from command) | Auto         |
+| `panes` | Pane layout (same syntax as top-level `panes`)         | Single shell |
+
+`focus: true` works across windows: the last pane with focus set determines
+which window is selected when the session opens.
+
+### Limitations
+
+- **tmux only**: Session mode is currently only supported for the tmux backend.
+- **No duplicates**: Unlike window mode which supports opening multiple windows
+  for the same worktree (`-2`, `-3` suffixes), session mode creates one session
+  per worktree.
 
 ## Workflow example
 
@@ -2274,11 +2413,14 @@ alternative terminal multiplexers:
 - **[kitty](https://workmux.raine.dev/guide/kitty)** (experimental) - For users
   who prefer kitty terminal. Requires `allow_remote_control` and `listen_on`
   configuration.
+- **[Zellij](https://workmux.raine.dev/guide/zellij)** (experimental) - For
+  users who prefer Zellij. Detected automatically via `$ZELLIJ`.
 
 workmux auto-detects the backend from environment variables (`$TMUX`,
-`$WEZTERM_PANE`, or `$KITTY_WINDOW_ID`). Session-specific variables are checked
-first, so running tmux inside kitty correctly selects the tmux backend. Set
-`$WORKMUX_BACKEND` to override detection.
+`$WEZTERM_PANE`, `$KITTY_WINDOW_ID`, or `$ZELLIJ`).
+Session-specific variables are checked first, so running tmux inside kitty
+correctly selects the tmux backend. Set `$WORKMUX_BACKEND` to override
+detection.
 
 ## Inspiration and related tools
 

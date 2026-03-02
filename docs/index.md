@@ -1,6 +1,6 @@
 ---
 layout: home
-description: The zero-friction workflow for git worktrees and tmux, kitty, or WezTerm
+description: The zero-friction workflow for git worktrees and tmux, kitty, WezTerm, or Zellij
 ---
 
 <div class="mono-editorial">
@@ -49,9 +49,31 @@ description: The zero-friction workflow for git worktrees and tmux, kitty, or We
       <div class="ed-why-item">
         <div class="ed-why-header">
           <span class="ed-why-icon"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg></span>
-          <h3>tmux is the interface</h3>
+          <h3>Terminal workflow</h3>
         </div>
-        <p>For existing and new tmux users. If you already live in tmux, it fits your workflow. If you don't, it's worth picking up.</p>
+        <p>Build on your familiar terminal setup instead of yet another agentic GUI that won't exist next year. Your tools, your muscle memory.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="ed-pain-points">
+  <div class="ed-container">
+    <div class="ed-accent-rule"></div>
+    <span class="ed-section-label">Worktree pain points, solved</span>
+    <p class="ed-section-desc">Git worktrees are powerful, but managing them manually is painful. workmux automates the rough edges.</p>
+    <div class="ed-pain-points-list">
+      <div class="ed-pain-point">
+        <h3>"You need to reinstall everything"</h3>
+        <p>New worktrees are clean checkouts with no <code>.env</code>, no <code>node_modules</code>, no dev server. workmux can <a href="/guide/configuration#file-operations">copy config files, symlink dependencies</a>, and <a href="/guide/configuration#lifecycle-hooks">run setup commands</a> on creation. Configure once, reuse everywhere.</p>
+      </div>
+      <div class="ed-pain-point">
+        <h3>"You need to clean up after"</h3>
+        <p><code>workmux merge</code> handles the full lifecycle: merge the branch, delete the worktree, close the tmux window, remove the local branch. One command. Or go next level and use the <a href="/guide/skills#merge"><code>/merge</code> skill</a> to let your agent commit, rebase, and merge autonomously.</p>
+      </div>
+      <div class="ed-pain-point">
+        <h3>"Conflicts arise on merge"</h3>
+        <p>Conflicts are inherent to git when changes overlap, and worktrees don't change that. But your agent can handle them. The <a href="/guide/skills#merge"><code>/merge</code></a> skill tells your agent to rebase onto the base branch, review the upstream changes, and resolve conflicts by understanding both sides. No manual conflict resolution needed in most cases. See <a href="/guide/workflows#finishing-work">finishing work</a>.</p>
       </div>
     </div>
   </div>
@@ -480,7 +502,7 @@ onMounted(() => {
 
 .ed-why-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 3rem;
 }
 
@@ -502,7 +524,6 @@ onMounted(() => {
 .ed-why-item h3 {
   font-family: var(--ed-font-display);
   font-size: 1.375rem;
-  white-space: nowrap;
   font-weight: 700;
   letter-spacing: -0.02em;
   line-height: 1.15;
@@ -513,6 +534,47 @@ onMounted(() => {
   font-size: 0.875rem;
   line-height: 1.7;
   color: var(--vp-c-text-2);
+}
+
+/* ===== Pain points section ===== */
+.ed-pain-points {
+  padding: 0 0 8rem;
+}
+
+.ed-pain-points-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.ed-pain-point {
+  padding: 1.75rem 0;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.ed-pain-point:last-child {
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.ed-pain-point h3 {
+  font-family: var(--ed-font-mono);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  margin-bottom: 0.5rem !important;
+}
+
+.ed-pain-point p {
+  font-size: 0.875rem;
+  line-height: 1.7;
+  color: var(--vp-c-text-2);
+}
+
+.ed-pain-point code {
+  font-family: var(--ed-font-mono);
+  font-size: 0.8125rem;
+  background: var(--vp-c-bg-soft);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
 }
 
 /* ===== Demo section ===== */
@@ -850,6 +912,7 @@ onMounted(() => {
   }
 
   .ed-why,
+  .ed-pain-points,
   .ed-demo,
   .ed-workflows,
   .ed-sandbox,
@@ -880,12 +943,11 @@ onMounted(() => {
   }
 
   .ed-hero-actions {
-    flex-direction: column;
-    align-items: flex-start;
     gap: 1rem;
   }
 
   .ed-why,
+  .ed-pain-points,
   .ed-demo,
   .ed-sandbox,
   .ed-dashboard,

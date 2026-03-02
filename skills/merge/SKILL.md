@@ -7,6 +7,15 @@ allowed-tools: Read, Bash, Glob, Grep
 
 <!-- Customize the commit style and rebase behavior to match your workflow. -->
 
+**Arguments:** `$ARGUMENTS`
+
+Check the arguments for flags:
+
+- `--keep`, `-k` → pass `--keep` to `workmux merge` (keeps the worktree and tmux window after merging)
+- `--no-verify`, `-n` → pass `--no-verify` to `workmux merge`
+
+Strip all flags from arguments.
+
 Commit, rebase, and merge the current branch.
 
 This command finishes work on the current branch by:
@@ -51,7 +60,10 @@ If conflicts occur:
 
 ## Step 3: Merge
 
-Run: `workmux merge --rebase --notification`
+Run: `workmux merge --rebase --notification [--keep] [--no-verify]`
+
+Include `--keep` only if the `--keep` flag was passed in arguments.
+Include `--no-verify` only if the `--no-verify` flag was passed in arguments.
 
 This will merge the branch into the base branch and clean up the worktree and
-tmux window.
+tmux window (unless `--keep` is used).

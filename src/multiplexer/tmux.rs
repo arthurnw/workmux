@@ -234,6 +234,109 @@ impl Multiplexer for TmuxBackend {
         Ok(pane_id.trim().to_string())
     }
 
+    fn create_session(&self, params: CreateSessionParams) -> Result<String> {
+        let prefixed_name = util::prefixed(params.prefix, params.name);
+        let working_dir_str = params
+            .cwd
+            .to_str()
+            .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
+
+        // Create a new detached session with the specified name and working directory
+        // -d: detached (don't switch to it yet)
+        // -s: session name
+        // -c: start directory
+        // -P -F: print the pane ID of the initial window
+        let mut cmd = Cmd::new("tmux").args(&[
+            "new-session",
+            "-d",
+            "-s",
+            &prefixed_name,
+            "-c",
+            working_dir_str,
+        ]);
+
+        // Optionally name the initial window
+        if let Some(window_name) = params.initial_window_name {
+            cmd = cmd.args(&["-n", window_name]);
+        }
+
+        let pane_id = cmd
+            .args(&["-P", "-F", "#{pane_id}"])
+            .run_and_capture_stdout()
+            .context("Failed to create tmux session and get pane ID")?;
+
+        let pane_id = pane_id.trim().to_string();
+
+        // Disable automatic window renaming for named windows so the name stays
+        if params.initial_window_name.is_some() {
+            let _ = self.tmux_cmd(&[
+                "set-window-option",
+                "-w",
+                "-t",
+                &pane_id,
+                "automatic-rename",
+                "off",
+            ]);
+        }
+
+        Ok(pane_id)
+    }
+
+    fn create_window_in_session(&self, params: CreateWindowInSessionParams) -> Result<String> {
+        let working_dir_str = params
+            .cwd
+            .to_str()
+            .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
+
+        // Target the specific session with trailing colon (creates window at next index)
+        let target = format!("{}:", params.session_name);
+
+        let mut cmd =
+            Cmd::new("tmux").args(&["new-window", "-d", "-t", &target, "-c", working_dir_str]);
+
+        // Optionally name the window
+        if let Some(window_name) = params.name {
+            cmd = cmd.args(&["-n", window_name]);
+        }
+
+        let pane_id = cmd
+            .args(&["-P", "-F", "#{pane_id}"])
+            .run_and_capture_stdout()
+            .context("Failed to create window in session")?;
+
+        let pane_id = pane_id.trim().to_string();
+
+        // Disable automatic window renaming for named windows
+        if params.name.is_some() {
+            let _ = self.tmux_cmd(&[
+                "set-window-option",
+                "-w",
+                "-t",
+                &pane_id,
+                "automatic-rename",
+                "off",
+            ]);
+        }
+
+        Ok(pane_id)
+    }
+
+    fn switch_to_session(&self, prefix: &str, name: &str) -> Result<()> {
+        let prefixed_name = util::prefixed(prefix, name);
+        self.tmux_cmd(&["switch-client", "-t", &prefixed_name])
+    }
+
+    fn session_exists(&self, full_name: &str) -> Result<bool> {
+        // has-session returns 0 if session exists, 1 if not
+        Cmd::new("tmux")
+            .args(&["has-session", "-t", full_name])
+            .run_as_check()
+    }
+
+    fn kill_session(&self, full_name: &str) -> Result<()> {
+        self.tmux_cmd(&["kill-session", "-t", full_name])
+    }
+
     fn kill_window(&self, full_name: &str) -> Result<()> {
         let target = format!("={}", full_name);
         self.tmux_cmd(&["kill-window", "-t", &target])
@@ -247,6 +350,18 @@ impl Multiplexer for TmuxBackend {
             "sleep {delay}; tmux kill-window -t {target} >/dev/null 2>&1",
             delay = delay_secs,
             target = escaped_target
+        );
+
+        self.run_shell(&script)
+    }
+
+    fn schedule_session_close(&self, full_name: &str, delay: Duration) -> Result<()> {
+        let delay_secs = format!("{:.3}", delay.as_secs_f64());
+        let escaped_name = format!("'{}'", full_name.replace('\'', r#"'\''"#));
+        let script = format!(
+            "sleep {delay}; tmux kill-session -t {name} >/dev/null 2>&1",
+            delay = delay_secs,
+            name = escaped_name
         );
 
         self.run_shell(&script)
@@ -278,6 +393,20 @@ impl Multiplexer for TmuxBackend {
         let target = format!("{}={}", session_prefix, full_name);
         let escaped = format!("'{}'", target.replace('\'', r#"'\''"#));
         Ok(format!("tmux kill-window -t {} >/dev/null 2>&1", escaped))
+    }
+
+    fn shell_switch_session_cmd(&self, full_name: &str) -> Result<String> {
+        let escaped = format!("'{}'", full_name.replace('\'', r#"'\''"#));
+        Ok(format!("tmux switch-client -t {} >/dev/null 2>&1", escaped))
+    }
+
+    fn shell_kill_session_cmd(&self, full_name: &str) -> Result<String> {
+        let escaped = format!("'{}'", full_name.replace('\'', r#"'\''"#));
+        Ok(format!("tmux kill-session -t {} >/dev/null 2>&1", escaped))
+    }
+
+    fn shell_switch_to_last_session_cmd(&self) -> Result<String> {
+        Ok("tmux switch-client -l >/dev/null 2>&1".to_string())
     }
 
     fn select_window(&self, prefix: &str, name: &str) -> Result<()> {
@@ -317,6 +446,13 @@ impl Multiplexer for TmuxBackend {
             .tmux_query(&["list-windows", "-F", "#{window_name}"])
             .unwrap_or_default();
         Ok(windows.lines().map(String::from).collect())
+    }
+
+    fn get_all_session_names(&self) -> Result<HashSet<String>> {
+        let sessions = self
+            .tmux_query(&["list-sessions", "-F", "#{session_name}"])
+            .unwrap_or_default();
+        Ok(sessions.lines().map(String::from).collect())
     }
 
     fn filter_active_windows(&self, windows: &[String]) -> Result<Vec<String>> {
@@ -408,13 +544,29 @@ impl Multiplexer for TmuxBackend {
         }
     }
 
+    fn wait_until_session_closed(&self, full_session_name: &str) -> Result<()> {
+        println!("Waiting for session '{}' to close...", full_session_name);
+
+        loop {
+            if !self.is_running()? {
+                return Ok(());
+            }
+
+            if !self.session_exists(full_session_name)? {
+                return Ok(());
+            }
+
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+
     // === Pane Management ===
 
     fn select_pane(&self, pane_id: &str) -> Result<()> {
         self.tmux_cmd(&["select-pane", "-t", pane_id])
     }
 
-    fn switch_to_pane(&self, pane_id: &str) -> Result<()> {
+    fn switch_to_pane(&self, pane_id: &str, _window_hint: Option<&str>) -> Result<()> {
         self.tmux_cmd(&["switch-client", "-t", pane_id])
     }
 
@@ -594,8 +746,8 @@ impl Multiplexer for TmuxBackend {
         }
 
         Ok(Some(LivePaneInfo {
-            pid: parts[1].parse().unwrap_or(0),
-            current_command: parts[2].to_string(),
+            pid: parts[1].parse().ok(),
+            current_command: Some(parts[2].to_string()),
             working_dir: PathBuf::from(parts[3]),
             title: if parts[4].is_empty() {
                 None
@@ -627,8 +779,8 @@ impl Multiplexer for TmuxBackend {
             panes.insert(
                 pane_id,
                 LivePaneInfo {
-                    pid: parts[1].parse().unwrap_or(0),
-                    current_command: parts[2].to_string(),
+                    pid: parts[1].parse().ok(),
+                    current_command: Some(parts[2].to_string()),
                     working_dir: PathBuf::from(parts[3]),
                     title: if parts[4].is_empty() {
                         None
@@ -644,7 +796,6 @@ impl Multiplexer for TmuxBackend {
         Ok(panes)
     }
 }
-
 /// Format string to inject into tmux window-status-format.
 const WORKMUX_STATUS_FORMAT: &str = "#{?@workmux_status, #{@workmux_status},}";
 

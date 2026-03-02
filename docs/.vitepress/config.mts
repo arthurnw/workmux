@@ -1,6 +1,9 @@
 import { defineConfig } from "vitepress";
 import fs from "fs";
 import path from "path";
+import { retinaImagesPlugin } from "./retina-images";
+
+const publicDir = path.join(__dirname, "..", "public");
 
 export default defineConfig({
   transformPageData(pageData) {
@@ -39,6 +42,7 @@ export default defineConfig({
         allow: [".."],
       },
     },
+    plugins: [retinaImagesPlugin(publicDir)],
   },
 
   themeConfig: {
@@ -104,11 +108,13 @@ export default defineConfig({
         items: [
           { text: "kitty", link: "/guide/kitty" },
           { text: "WezTerm", link: "/guide/wezterm" },
+          { text: "Zellij", link: "/guide/zellij" },
         ],
       },
       {
         text: "Guides",
         items: [
+          { text: "Session mode", link: "/guide/session-mode" },
           { text: "direnv", link: "/guide/direnv" },
           { text: "Monorepos", link: "/guide/monorepos" },
           { text: "Git worktree caveats", link: "/guide/git-worktree-caveats" },
@@ -131,6 +137,7 @@ export default defineConfig({
           { text: "sandbox", link: "/reference/commands/sandbox" },
           { text: "completions", link: "/reference/commands/completions" },
           { text: "docs", link: "/reference/commands/docs" },
+          { text: "update", link: "/reference/commands/update" },
         ],
       },
     ],

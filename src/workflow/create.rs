@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
+use crate::config::MuxMode;
+use crate::multiplexer::MuxHandle;
 use crate::{claude, git, spinner};
 use tracing::{debug, info, warn};
 
@@ -53,7 +55,19 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         "create:start"
     );
 
-    // Validate pane config before any other operations
+    // Validate layout config before any other operations
+    if context.config.panes.is_some() && context.config.windows.is_some() {
+        anyhow::bail!("Cannot specify both 'panes' and 'windows' in configuration.");
+    }
+    if let Some(windows) = &context.config.windows {
+        if options.mode != MuxMode::Session {
+            anyhow::bail!(
+                "'windows' configuration requires 'mode: session'. \
+                 Either add 'mode: session' to your config or use --session flag."
+            );
+        }
+        crate::config::validate_windows_config(windows)?;
+    }
     if let Some(panes) = &context.config.panes {
         crate::config::validate_panes_config(panes)?;
     }
@@ -61,16 +75,27 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     // Pre-flight checks
     context.ensure_mux_running()?;
 
-    // Check if worktree or window already exists
-    let window_exists = context.mux.window_exists(&context.prefix, handle)?;
+    // Validate backend supports session mode before creating any git state
+    if options.mode == MuxMode::Session && context.mux.name() != "tmux" {
+        return Err(anyhow!(
+            "Session mode (--session) is only supported with tmux.\n\
+             Current backend: {}. Use window mode instead.",
+            context.mux.name()
+        ));
+    }
+
+    // Check if worktree or target (window/session) already exists
+    let target = MuxHandle::new(context.mux.as_ref(), options.mode, &context.prefix, handle);
+    let full_target_name = target.full_name();
+    let target_exists = target.exists()?;
     let worktree_exists = git::worktree_exists(branch_name)?;
 
     // If open_if_exists is set and either exists, delegate to open workflow
-    if options.open_if_exists && (window_exists || worktree_exists) {
+    if options.open_if_exists && (target_exists || worktree_exists) {
         debug!(
             branch = branch_name,
             handle = handle,
-            window_exists,
+            target_exists,
             worktree_exists,
             "create:delegating to open (open_if_exists=true)"
         );
@@ -89,18 +114,19 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
             open_if_exists: false,
             resume_session_id: None,
             prior_agent_state: None,
+            mode: options.mode,
         };
 
         return super::open::open(branch_name, context, open_options, false, None);
     }
 
-    // Check window using handle (the display name)
-    if window_exists {
+    // Check target using handle (the display name)
+    if target_exists {
         return Err(anyhow!(
-            "A {} window named '{}{}' already exists",
+            "A {} {} named '{}' already exists",
             context.mux.name(),
-            context.prefix,
-            handle
+            target.kind(),
+            full_target_name
         ));
     }
 
@@ -322,6 +348,18 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         }
     }
 
+    // Store the tmux mode in git config for cleanup operations
+    // This allows remove/close/merge to know whether to kill a window or session
+    if options.mode == MuxMode::Session {
+        git::set_worktree_meta(handle, "mode", "session")
+            .with_context(|| format!("Failed to store tmux mode for worktree '{}'", handle))?;
+        debug!(
+            handle = handle,
+            mode = "session",
+            "create:stored tmux mode in git config"
+        );
+    }
+
     // Store the comparison base in git config (used for stats and merge target)
     git::set_branch_base(branch_name, &comparison_base).with_context(|| {
         format!(
@@ -458,6 +496,9 @@ pub fn create_with_changes(
         .context("Failed to stash current changes")?;
     info!(branch = branch_name, "create_with_changes: changes stashed");
 
+    // Capture mode before moving options (needed for rollback cleanup)
+    let mode = options.mode;
+
     // 2. Create new worktree
     let create_result = match create(
         context,
@@ -525,6 +566,7 @@ pub fn create_with_changes(
                 &context.main_branch,
                 handle,
                 &cleanup_result,
+                mode,
             )?;
 
             Err(anyhow!(

@@ -2,13 +2,14 @@ use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::multiplexer::{CreateWindowParams, Multiplexer, PaneSetupOptions};
+use crate::config::{MuxMode, WindowConfig};
+use crate::multiplexer::{
+    CreateSessionParams, CreateWindowInSessionParams, CreateWindowParams, Multiplexer,
+    PaneSetupOptions,
+};
 use crate::state::{AgentState, PaneKey, StateStore};
 use crate::{cmd, config, git, prompt::Prompt};
 use tracing::{debug, info, warn};
-
-use fs_extra::dir as fs_dir;
-use fs_extra::file as fs_file;
 
 use super::types::CreateResult;
 
@@ -113,14 +114,29 @@ pub fn setup_environment(
         );
     }
 
-    // Resolve pane configuration early -- needed for Lima pre-boot check
-    // and prompt validation, both of which must happen before window creation.
-    let panes = config.panes.as_deref().unwrap_or(&[]);
-    let resolved_panes = resolve_pane_configuration(panes, agent);
+    // Build window plans: normalize windows/panes config into a list of window configs.
+    // In window mode, we always use a single window from panes config.
+    // In session mode, we can use multiple windows from windows config.
+    let window_plans: Vec<WindowConfig> = if let Some(windows) = &config.windows {
+        // windows config is session-mode only (validated at config load time)
+        windows.clone()
+    } else {
+        // Legacy: wrap panes in a single window plan
+        let panes = config.panes.clone();
+        vec![WindowConfig { name: None, panes }]
+    };
+
+    // Flatten all panes across all windows for prechecks.
+    // This ensures Lima pre-boot and prompt validation consider ALL panes.
+    let all_panes: Vec<config::PaneConfig> = window_plans
+        .iter()
+        .flat_map(|w| w.panes.as_deref().unwrap_or(&[]).iter().cloned())
+        .collect();
+    let all_resolved_panes = resolve_pane_configuration(&all_panes, agent);
 
     // Validate that prompt will be consumed if one was provided
     if options.prompt_file_path.is_some() {
-        validate_prompt_consumption(&resolved_panes, agent, config, options)?;
+        validate_prompt_consumption(&all_resolved_panes, agent, config, options)?;
     }
 
     // Pre-boot Lima VM if needed BEFORE creating the tmux window.
@@ -129,81 +145,163 @@ pub fn setup_environment(
     let lima_vm_name = pre_boot_lima_vm(
         mux,
         config,
-        &resolved_panes,
+        &all_resolved_panes,
         effective_working_dir,
         worktree_path,
         options,
         agent,
     )?;
 
-    // Find the last workmux-managed window to insert the new one after.
-    // If after_window is provided (for duplicate windows), use that to group with base handle.
-    // Otherwise, use prefix-based lookup to group workmux windows together.
-    // If not found (or error), falls back to default append behavior.
-    let last_wm_window = after_window.or_else(|| {
-        mux.find_last_window_with_prefix_in_session(prefix, target_session)
-            .unwrap_or(None)
-    });
+    let pane_setup_options = PaneSetupOptions {
+        run_commands: options.run_pane_commands,
+        prompt_file_path: options.prompt_file_path.as_deref(),
+        resume_session_id: options.resume_session_id.as_deref(),
+        worktree_root: Some(worktree_path),
+        lima_vm_name: lima_vm_name.as_deref(),
+    };
 
-    // Create window and get the initial pane's ID
-    // Use handle for the window name (not branch_name)
-    let initial_pane_id = mux
-        .create_window(CreateWindowParams {
-            prefix,
-            name: handle,
-            cwd: effective_working_dir,
-            after_window: last_wm_window.as_deref(),
-            target_session,
-        })
-        .context("Failed to create window")?;
-    info!(
-        branch = branch_name,
-        handle = handle,
-        pane_id = %initial_pane_id,
-        "setup_environment:window created"
-    );
+    // Track the focus pane and agent pane IDs across all windows
+    let mut focus_pane_id: Option<String> = None;
+    let mut all_agent_pane_ids: Vec<String> = Vec::new();
 
-    let pane_setup_result = mux
-        .setup_panes(
-            &initial_pane_id,
-            &resolved_panes,
-            effective_working_dir,
-            PaneSetupOptions {
-                run_commands: options.run_pane_commands,
-                prompt_file_path: options.prompt_file_path.as_deref(),
-                resume_session_id: options.resume_session_id.as_deref(),
-                worktree_root: Some(worktree_path),
-                lima_vm_name: lima_vm_name.as_deref(),
-            },
-            config,
-            agent,
-        )
-        .context("Failed to setup panes")?;
+    match options.mode {
+        MuxMode::Window => {
+            // Window mode: single window, use panes config (window_plans always has 1 entry)
+            let panes = window_plans[0].panes.as_deref().unwrap_or(&[]);
+            let resolved_panes = resolve_pane_configuration(panes, agent);
+
+            let last_wm_window = after_window.or_else(|| {
+                mux.find_last_window_with_prefix_in_session(prefix, target_session)
+                    .unwrap_or(None)
+            });
+
+            let initial_pane_id = mux
+                .create_window(CreateWindowParams {
+                    prefix,
+                    name: handle,
+                    cwd: effective_working_dir,
+                    after_window: last_wm_window.as_deref(),
+                    target_session,
+                })
+                .context("Failed to create window")?;
+            info!(
+                branch = branch_name,
+                handle = handle,
+                pane_id = %initial_pane_id,
+                "setup_environment:window created"
+            );
+
+            let result = mux
+                .setup_panes(
+                    &initial_pane_id,
+                    &resolved_panes,
+                    effective_working_dir,
+                    pane_setup_options,
+                    config,
+                    agent,
+                )
+                .context("Failed to setup panes")?;
+
+            all_agent_pane_ids.extend(result.agent_pane_ids);
+            focus_pane_id = Some(result.focus_pane_id);
+        }
+        MuxMode::Session => {
+            let session_full_name = crate::multiplexer::util::prefixed(prefix, handle);
+
+            for (i, window_plan) in window_plans.iter().enumerate() {
+                let panes = window_plan.panes.as_deref().unwrap_or(&[]);
+                let resolved_panes = resolve_pane_configuration(panes, agent);
+
+                let initial_pane_id = if i == 0 {
+                    // First window: create the session
+                    let pane_id = mux
+                        .create_session(CreateSessionParams {
+                            prefix,
+                            name: handle,
+                            cwd: effective_working_dir,
+                            initial_window_name: window_plan.name.as_deref(),
+                        })
+                        .context("Failed to create session")?;
+                    info!(
+                        branch = branch_name,
+                        handle = handle,
+                        window = ?window_plan.name,
+                        pane_id = %pane_id,
+                        "setup_environment:session created (window 0)"
+                    );
+                    pane_id
+                } else {
+                    // Subsequent windows: create within the existing session
+                    let pane_id = mux
+                        .create_window_in_session(CreateWindowInSessionParams {
+                            session_name: &session_full_name,
+                            name: window_plan.name.as_deref(),
+                            cwd: effective_working_dir,
+                        })
+                        .context("Failed to create window in session")?;
+                    info!(
+                        branch = branch_name,
+                        handle = handle,
+                        window = ?window_plan.name,
+                        window_index = i,
+                        pane_id = %pane_id,
+                        "setup_environment:window created in session"
+                    );
+                    pane_id
+                };
+
+                let result = mux
+                    .setup_panes(
+                        &initial_pane_id,
+                        &resolved_panes,
+                        effective_working_dir,
+                        pane_setup_options.clone(),
+                        config,
+                        agent,
+                    )
+                    .context("Failed to setup panes")?;
+
+                all_agent_pane_ids.extend(result.agent_pane_ids);
+
+                // Track focus: last window with a focus: true pane wins.
+                // If no pane has focus: true, use the first window's default.
+                let has_explicit_focus = resolved_panes.iter().any(|p| p.focus);
+                if i == 0 || has_explicit_focus {
+                    focus_pane_id = Some(result.focus_pane_id);
+                }
+            }
+        }
+    }
+
+    let focus_pane_id = focus_pane_id.expect("at least one window must be created");
     debug!(
         branch = branch_name,
-        focus_id = %pane_setup_result.focus_pane_id,
-        agent_panes = pane_setup_result.agent_pane_ids.len(),
+        focus_id = %focus_pane_id,
         "setup_environment:panes configured"
     );
 
     // Write initial agent state for dashboard visibility
-    if !pane_setup_result.agent_pane_ids.is_empty() {
+    if !all_agent_pane_ids.is_empty() {
         write_initial_agent_state(
             mux,
-            &pane_setup_result.agent_pane_ids,
+            &all_agent_pane_ids,
             effective_working_dir,
             options.prior_agent_state.as_ref(),
         );
     }
 
-    // Focus the configured pane and optionally switch to the window
+    // Focus the configured pane and optionally switch to the window/session.
+    // select_pane automatically selects the containing window in tmux.
     if options.focus_window {
-        mux.select_pane(&pane_setup_result.focus_pane_id)?;
-        // Use handle for window selection (not branch_name)
-        mux.select_window(prefix, handle)?;
-    } else {
-        // Background mode: do not steal focus from the current window.
-        // We intentionally skip select_window to keep the user's current window.
+        mux.select_pane(&focus_pane_id)?;
+        match options.mode {
+            MuxMode::Window => {
+                mux.select_window(prefix, handle)?;
+            }
+            MuxMode::Session => {
+                mux.switch_to_session(prefix, handle)?;
+            }
+        }
     }
 
     Ok(CreateResult {
@@ -257,8 +355,8 @@ fn write_initial_agent_state(
     };
 
     for pane_id in agent_pane_ids {
-        let (pid, command) = match mux.get_live_pane_info(pane_id) {
-            Ok(Some(info)) => (info.pid, info.current_command),
+        let live_info = match mux.get_live_pane_info(pane_id) {
+            Ok(Some(info)) => info,
             Ok(None) => {
                 warn!(pane_id, "Pane not found for initial agent state");
                 continue;
@@ -290,10 +388,12 @@ fn write_initial_agent_state(
             status,
             status_ts,
             pane_title,
-            pane_pid: pid,
-            command,
+            pane_pid: live_info.pid.unwrap_or(0),
+            command: live_info.current_command.unwrap_or_default(),
             updated_ts: now,
             restored,
+            window_name: live_info.window,
+            session_name: live_info.session,
         };
 
         if let Err(e) = store.upsert_agent(&state) {
@@ -354,6 +454,7 @@ fn pre_boot_lima_vm(
         }
         let is_agent_pane = pane_config.command.as_deref().is_some_and(|cmd| {
             cmd == "<agent>"
+                || crate::multiplexer::agent::is_known_agent(cmd)
                 || effective_agent.is_some_and(|a| crate::config::is_agent_command(cmd, a))
         });
         match config.sandbox.target() {
@@ -379,10 +480,11 @@ pub fn resolve_pane_configuration(
         return original_panes.to_vec();
     };
 
-    if original_panes
-        .iter()
-        .any(|pane| pane.command.as_deref() == Some("<agent>"))
-    {
+    if original_panes.iter().any(|pane| {
+        pane.command
+            .as_deref()
+            .is_some_and(|cmd| cmd == "<agent>" || crate::multiplexer::agent::is_known_agent(cmd))
+    }) {
         return original_panes.to_vec();
     }
 
@@ -473,16 +575,8 @@ pub fn handle_file_operations(
                 let dest_path = worktree_path.join(relative_path);
 
                 if source_path.is_dir() {
-                    // Create destination parent directory
-                    if let Some(parent) = dest_path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    // Use fs_extra::dir::copy which handles recursion and symlinks correctly
-                    let mut dir_options = fs_dir::CopyOptions::new();
-                    dir_options.overwrite = true;
-                    dir_options.content_only = true;
-                    fs::create_dir_all(&dest_path)?; // Ensure dest exists
-                    fs_dir::copy(&source_path, &dest_path, &dir_options).with_context(|| {
+                    // Recursively copy directory contents
+                    copy_dir_recursive(&source_path, &dest_path).with_context(|| {
                         format!(
                             "Failed to copy directory {:?} to {:?}",
                             source_path, dest_path
@@ -495,9 +589,7 @@ pub fn handle_file_operations(
                             format!("Failed to create parent directory for {:?}", dest_path)
                         })?;
                     }
-                    let mut options = fs_file::CopyOptions::new();
-                    options.overwrite = true;
-                    fs_file::copy(&source_path, &dest_path, &options).with_context(|| {
+                    fs::copy(&source_path, &dest_path).with_context(|| {
                         format!("Failed to copy file {:?} to {:?}", source_path, dest_path)
                     })?;
                 }
@@ -665,6 +757,40 @@ fn resolve_git_exclude_path(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Recursively copy a directory's contents into the destination, overwriting existing files.
+/// Symlinks are preserved rather than followed to avoid infinite recursion on symlink loops.
+/// Special files (sockets, FIFOs) are skipped to avoid blocking.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
+
+        // Remove existing entry at destination to support overwrite
+        if let Ok(meta) = dst_path.symlink_metadata() {
+            if meta.is_dir() && file_type.is_dir() {
+                // Both are directories; merge contents
+            } else if meta.is_dir() {
+                fs::remove_dir_all(&dst_path)?;
+            } else {
+                fs::remove_file(&dst_path)?;
+            }
+        }
+
+        if file_type.is_symlink() {
+            let target = fs::read_link(&src_path)?;
+            std::os::unix::fs::symlink(&target, &dst_path)?;
+        } else if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,6 +897,7 @@ mod tests {
             open_if_exists: false,
             resume_session_id: None,
             prior_agent_state: None,
+            mode: crate::config::MuxMode::default(),
         }
     }
 
@@ -887,7 +1014,7 @@ mod tests {
     #[test]
     fn validate_prompt_cli_agent_overrides_config() {
         let panes = vec![config::PaneConfig {
-            command: Some("gemini".to_string()),
+            command: Some("my-custom-agent".to_string()),
             focus: true,
             split: None,
             size: None,
@@ -897,8 +1024,9 @@ mod tests {
         let config = make_config_with_agent(Some("claude")); // config says claude
         let options = make_options_with_prompt(true);
 
-        // CLI agent is gemini, which matches the pane
-        let result = super::validate_prompt_consumption(&panes, Some("gemini"), &config, &options);
+        // CLI agent is my-custom-agent, which matches the pane
+        let result =
+            super::validate_prompt_consumption(&panes, Some("my-custom-agent"), &config, &options);
         assert!(result.is_ok());
 
         // CLI agent is None, falls back to config (claude), which doesn't match
@@ -931,6 +1059,54 @@ mod tests {
 
         let result = super::validate_prompt_consumption(&panes, None, &config, &options);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_prompt_succeeds_with_known_agent_command() {
+        let panes = vec![config::PaneConfig {
+            command: Some("codex --yolo".to_string()),
+            focus: true,
+            split: None,
+            size: None,
+            percentage: None,
+            target: None,
+        }];
+        let config = make_config_with_agent(None); // no global agent
+        let options = make_options_with_prompt(true);
+
+        // Known agent command should pass validation even without global agent
+        let result = super::validate_prompt_consumption(&panes, None, &config, &options);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_pane_configuration_known_agent_returns_original() {
+        let original_panes = vec![
+            config::PaneConfig {
+                command: Some("claude --dangerously-skip-permissions".to_string()),
+                focus: true,
+                split: None,
+                size: None,
+                percentage: None,
+                target: None,
+            },
+            config::PaneConfig {
+                command: Some("codex --yolo".to_string()),
+                focus: false,
+                split: Some(config::SplitDirection::Vertical),
+                size: None,
+                percentage: None,
+                target: None,
+            },
+        ];
+
+        // Should NOT overwrite known agent panes with the cli agent
+        let result = resolve_pane_configuration(&original_panes, Some("gemini"));
+        assert_eq!(
+            result[0].command.as_deref(),
+            Some("claude --dangerously-skip-permissions")
+        );
+        assert_eq!(result[1].command.as_deref(), Some("codex --yolo"));
     }
 
     #[test]
@@ -1041,6 +1217,20 @@ fn validate_prompt_consumption(
         ));
     }
 
+    // Known agent commands always consume prompts (they have their own agent
+    // profile), so the prompt is consumed regardless of whether a global agent
+    // is configured.
+    let has_self_identifying_agent = panes.iter().any(|pane| {
+        pane.command
+            .as_deref()
+            .is_some_and(crate::multiplexer::agent::is_known_agent)
+    });
+
+    if has_self_identifying_agent {
+        return Ok(());
+    }
+
+    // For non-named panes, require a global agent
     let effective_agent = cli_agent.or(config.agent.as_deref());
 
     let Some(agent_cmd) = effective_agent else {

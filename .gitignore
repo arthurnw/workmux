@@ -20,9 +20,11 @@ tests/venv
 node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+docs/public/_1x/
 
 # Nix
 result
 result-*
 history
 .worktrees
+.claude/temp

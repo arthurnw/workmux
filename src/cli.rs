@@ -214,6 +214,10 @@ enum Commands {
         /// Block until the created tmux window is closed
         #[arg(short = 'W', long)]
         wait: bool,
+
+        /// Create the window in its own tmux session (useful for session-per-project workflows)
+        #[arg(short = 's', long)]
+        session: bool,
     },
 
     /// Open a tmux window for an existing worktree
@@ -417,11 +421,17 @@ enum Commands {
     /// Generate example .workmux.yaml configuration file
     Init,
 
+    /// Set up agent status tracking hooks
+    Setup,
+
     /// Show detailed documentation (renders README.md)
     Docs,
 
     /// Show the changelog (what's new in each version)
     Changelog,
+
+    /// Update workmux to the latest version
+    Update,
 
     /// Show a TUI dashboard of all active workmux agents across all sessions
     Dashboard {
@@ -505,6 +515,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Read clipboard from host (used by sandbox clipboard shims)
+    #[command(hide = true, name = "clipboard-read")]
+    ClipboardRead {
+        /// MIME type to read
+        mime: String,
+    },
+
     /// Generate shell completions
     Completions {
         /// The shell to generate completions for
@@ -530,6 +547,10 @@ enum Commands {
         #[command(subcommand)]
         command: InternalCommands,
     },
+
+    /// Background update check (internal use)
+    #[command(hide = true, name = "_check-update")]
+    CheckUpdate,
 }
 
 #[derive(Subcommand)]
@@ -589,6 +610,21 @@ fn should_prompt_nerdfont(cmd: &Commands) -> bool {
     )
 }
 
+/// Check if the command should show the status tracking setup wizard.
+/// Excludes `Setup` to avoid double-prompting (the setup command handles its own flow).
+/// Excludes `Dashboard` because the wizard prompt interferes with the TUI.
+fn should_prompt_status_setup(cmd: &Commands) -> bool {
+    matches!(
+        cmd,
+        Commands::Add { .. } | Commands::Init | Commands::List { .. }
+    )
+}
+
+/// Check if the command should trigger a background update check.
+fn should_check_update(cmd: &Commands) -> bool {
+    matches!(cmd, Commands::Add { .. })
+}
+
 // --- Public Entry Point ---
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -614,6 +650,21 @@ pub fn run() -> Result<()> {
     };
     nerdfont::init(Some(nerdfont_enabled), has_pua);
 
+    // Check agent status tracking setup after nerdfont.
+    // Uses a separate gate to avoid double-prompting when running `workmux setup`.
+    if config_ok
+        && should_prompt_status_setup(&cli.command)
+        && let Err(e) = crate::agent_setup::prompt_wizard()
+    {
+        tracing::debug!(?e, "status setup wizard failed");
+    }
+
+    // Background update check: reads local cache, optionally shows a notice,
+    // and spawns a background process to refresh the cache if stale.
+    if should_check_update(&cli.command) {
+        command::update::check_and_notify(&cfg);
+    }
+
     match cli.command {
         Commands::Add {
             branch_name,
@@ -626,6 +677,7 @@ pub fn run() -> Result<()> {
             rescue,
             multi,
             wait,
+            session,
         } => command::add::run(
             branch_name.as_deref(),
             pr,
@@ -637,6 +689,7 @@ pub fn run() -> Result<()> {
             rescue,
             multi,
             wait,
+            session,
         ),
         Commands::Open {
             name,
@@ -702,8 +755,10 @@ pub fn run() -> Result<()> {
         } => command::run::run(&name, command, background, keep, timeout),
         Commands::Exec { run_dir } => command::exec::run(&run_dir),
         Commands::Init => crate::config::Config::init(),
+        Commands::Setup => command::setup::run(),
         Commands::Docs => command::docs::run(),
         Commands::Changelog => command::changelog::run(),
+        Commands::Update => command::update::run(),
         Commands::Dashboard {
             preview_size,
             diff,
@@ -740,6 +795,10 @@ pub fn run() -> Result<()> {
             let code = command::host_exec::run(command, cmd_args)?;
             std::process::exit(code);
         }
+        Commands::ClipboardRead { mime } => {
+            let code = command::clipboard_read::run(&mime)?;
+            std::process::exit(code);
+        }
         Commands::Completions { shell } => {
             generate_completions(shell);
             Ok(())
@@ -773,6 +832,7 @@ pub fn run() -> Result<()> {
                 Ok(())
             }
         },
+        Commands::CheckUpdate => command::update::run_background_check(),
     }
 }
 

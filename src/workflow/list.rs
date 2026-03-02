@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use crate::config::MuxMode;
 use crate::multiplexer::{Multiplexer, util};
 use crate::state::StateStore;
 use crate::util::canon_or_self;
@@ -73,10 +74,15 @@ pub fn list(
         return Ok(Vec::new());
     }
 
-    // Check mux status and get all windows once to avoid repeated process calls
+    // Check mux status and get all windows/sessions once to avoid repeated process calls
     let mux_running = mux.is_running().unwrap_or(false);
     let mux_windows: HashSet<String> = if mux_running {
         mux.get_all_window_names().unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
+    let mux_sessions: HashSet<String> = if mux_running {
+        mux.get_all_session_names().unwrap_or_default()
     } else {
         HashSet::new()
     };
@@ -117,6 +123,9 @@ pub fn list(
         .map(|a| (canon_or_self(&a.path), a.status))
         .collect();
 
+    // Batch-load all worktree modes in a single git config call
+    let worktree_modes = git::get_all_worktree_modes();
+
     let prefix = config.window_prefix();
     let worktrees: Vec<WorktreeInfo> = worktrees_data
         .into_iter()
@@ -128,9 +137,17 @@ pub fn list(
                 .unwrap_or(&branch)
                 .to_string();
 
-            // Use handle for mux window check, not branch name
-            let prefixed_window_name = util::prefixed(prefix, &handle);
-            let has_mux_window = mux_windows.contains(&prefixed_window_name);
+            // Check if mux target exists (window or session based on stored mode)
+            let prefixed_name = util::prefixed(prefix, &handle);
+            let mode = worktree_modes
+                .get(&handle)
+                .copied()
+                .unwrap_or(MuxMode::Window);
+            let has_mux_window = if mode == MuxMode::Session {
+                mux_sessions.contains(&prefixed_name)
+            } else {
+                mux_windows.contains(&prefixed_name)
+            };
 
             // Check for unmerged commits, but only if this isn't the main branch
             let has_unmerged = if let Some(ref main) = main_branch {

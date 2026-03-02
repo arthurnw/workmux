@@ -1,4 +1,5 @@
 use crate::command::args::PromptArgs;
+use crate::config::MuxMode;
 use crate::multiplexer::{create_backend, detect_backend};
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
 use crate::workflow::{SetupOptions, WorkflowContext};
@@ -24,6 +25,13 @@ pub fn run(
     let (config, config_location) = config::Config::load_with_location(None)?;
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, config_location)?;
+
+    // Determine the target mode from stored metadata
+    let stored_mode = git::get_worktree_mode(&resolved_name);
+    let target_type = match stored_mode {
+        MuxMode::Session => "session",
+        MuxMode::Window => "window",
+    };
 
     // Load prompt if any prompt argument is provided
     let prompt = load_prompt(&PromptLoadArgs {
@@ -53,9 +61,10 @@ pub fn run(
 
     // Construct setup options (pane commands always run on open)
     let mut options = SetupOptions::new(run_hooks, force_files, true);
+    options.mode = stored_mode;
     options.prompt_file_path = prompt_file_path;
 
-    // Only announce hooks if we're forcing a new window (otherwise we might just switch)
+    // Only announce hooks if we're forcing a new target (otherwise we might just switch)
     if new_window {
         super::announce_hooks(
             &context.config,
@@ -89,7 +98,8 @@ pub fn run(
 
     if result.did_switch {
         println!(
-            "✓ Switched to existing tmux window for '{}'\n  Worktree: {}",
+            "✓ Switched to existing tmux {} for '{}'\n  Worktree: {}",
+            target_type,
             resolved_name,
             result.worktree_path.display()
         );
@@ -99,7 +109,8 @@ pub fn run(
         }
 
         println!(
-            "✓ Opened tmux window for '{}'\n  Worktree: {}",
+            "✓ Opened tmux {} for '{}'\n  Worktree: {}",
+            target_type,
             resolved_name,
             result.worktree_path.display()
         );

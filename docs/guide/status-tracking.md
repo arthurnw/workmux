@@ -15,6 +15,7 @@ Workmux can display the status of the agent in your tmux window list, giving you
 | Agent       | Status                                                                 |
 | ----------- | ---------------------------------------------------------------------- |
 | Claude Code | ✅ Supported                                                           |
+| Copilot CLI | ✅ Supported (no 💬 waiting state)                                     |
 | OpenCode    | ✅ Supported                                                           |
 | Gemini CLI  | [In progress](https://github.com/google-gemini/gemini-cli/issues/9070) |
 | Codex       | [Tracking issue](https://github.com/openai/codex/issues/2109)          |
@@ -25,9 +26,21 @@ Workmux can display the status of the agent in your tmux window list, giving you
 - 💬 = agent is waiting for user input
 - ✅ = agent finished (auto-clears on window focus)
 
+## Automated setup
+
+Run `workmux setup` to automatically detect your agent CLIs and install status tracking hooks:
+
+```bash
+workmux setup
+```
+
+This detects Claude Code, Copilot CLI, and OpenCode by checking for their configuration directories, then offers to install the appropriate hooks. Workmux will also prompt you on first run if it detects an agent without status tracking configured.
+
+Workmux automatically modifies your tmux `window-status-format` to display the status icons. This happens once per session and only affects the current tmux session (not your global config).
+
 ## Claude Code setup
 
-Install the workmux status plugin:
+If you prefer manual setup, install the workmux status plugin:
 
 ```bash
 claude plugin marketplace add raine/workmux
@@ -36,11 +49,9 @@ claude plugin install workmux-status
 
 Alternatively, you can manually add the hooks to `~/.claude/settings.json`. See [.claude-plugin/plugin.json](https://github.com/raine/workmux/blob/main/.claude-plugin/plugin.json) for the hook configuration.
 
-Workmux automatically modifies your tmux `window-status-format` to display the status icons. This happens once per session and only affects the current tmux session (not your global config).
-
 ## OpenCode setup
 
-Download the workmux status plugin to your global OpenCode plugin directory:
+If you prefer manual setup, download the workmux status plugin to your global OpenCode plugin directory:
 
 ```bash
 mkdir -p ~/.config/opencode/plugin
@@ -49,6 +60,18 @@ curl -o ~/.config/opencode/plugin/workmux-status.ts \
 ```
 
 Restart OpenCode for the plugin to take effect.
+
+## Copilot CLI setup
+
+If you prefer manual setup, copy the hooks configuration to your repository:
+
+```bash
+mkdir -p .github/hooks/workmux-status
+curl -o .github/hooks/workmux-status/hooks.json \
+  https://raw.githubusercontent.com/raine/workmux/main/.github/hooks/workmux-status/hooks.json
+```
+
+Note: Copilot CLI hooks are per-repository, unlike Claude Code and OpenCode which install globally. The Copilot CLI hooks API does not support detecting permission prompts, so only working/done states are tracked (no waiting state).
 
 ## Customization
 
@@ -60,6 +83,13 @@ status_icons:
   working: "🔄"
   waiting: "⏸️"
   done: "✔️"
+```
+
+Tmux style codes are supported for colored icons, and work in both the tmux status bar and the dashboard:
+
+```yaml
+status_icons:
+  done: "#[fg=#a6e3a1]󰄴#[fg=default]"
 ```
 
 If you prefer to manage the tmux format yourself, disable auto-modification and add the status variable to your `~/.tmux.conf`:

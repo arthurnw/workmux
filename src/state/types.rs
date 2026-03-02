@@ -23,7 +23,10 @@ pub struct PaneKey {
     /// Backend instance identifier (e.g., tmux socket path, wezterm mux ID)
     pub instance: String,
 
-    /// Pane identifier within the backend
+    /// Pane identifier within the backend.
+    /// - tmux: pane ID (e.g., "%42")
+    /// - WezTerm: numeric pane ID
+    /// - Zellij: terminal pane ID (e.g., "terminal_5")
     pub pane_id: String,
 }
 
@@ -98,29 +101,34 @@ pub struct AgentState {
 
     /// True when status was carried forward from a prior (orphaned) agent state
     /// during restore. Prevents reconciliation from deleting the state when the
-    /// foreground command changes (shell → agent transition).
+    /// foreground command changes (shell -> agent transition).
     /// Cleared automatically when the agent's first hook fires.
     #[serde(default)]
     pub restored: bool,
+
+    /// Window/tab name where this agent is running.
+    /// Stored here because some backends (Zellij) can't query unfocused panes.
+    #[serde(default)]
+    pub window_name: Option<String>,
+
+    /// Session name where this agent is running.
+    /// Stored here for consistency with window_name.
+    #[serde(default)]
+    pub session_name: Option<String>,
 }
 
 impl AgentState {
     /// Convert to AgentPane for dashboard display.
     ///
-    /// Requires session/window info from multiplexer since we don't store those.
-    /// Uses live_title from multiplexer if available, falls back to stored title.
-    pub fn to_agent_pane(
-        &self,
-        session: String,
-        window_name: String,
-        live_title: Option<String>,
-    ) -> AgentPane {
+    /// The caller is responsible for providing the best available session/window names
+    /// (from live pane info when available, falling back to stored values).
+    pub fn to_agent_pane(&self, session: String, window_name: String) -> AgentPane {
         AgentPane {
             session,
             window_name,
             pane_id: self.pane_key.pane_id.clone(),
             path: self.workdir.clone(),
-            pane_title: live_title.or_else(|| self.pane_title.clone()),
+            pane_title: self.pane_title.clone(),
             status: self.status,
             status_ts: self.status_ts,
         }

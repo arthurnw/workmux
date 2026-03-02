@@ -2,6 +2,7 @@ pub mod add;
 pub mod args;
 pub mod capture;
 pub mod changelog;
+pub mod clipboard_read;
 pub mod close;
 pub mod config;
 pub mod dashboard;
@@ -23,7 +24,9 @@ pub mod send;
 pub mod session;
 pub mod set_base;
 pub mod set_window_status;
+pub mod setup;
 pub mod status;
+pub mod update;
 pub mod wait;
 
 use anyhow::{Context, Result, anyhow};

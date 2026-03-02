@@ -4,9 +4,14 @@ use std::path::Path;
 use std::time::SystemTime;
 use std::{thread, time::Duration};
 
+use crate::config::MuxMode;
 use crate::multiplexer::{Multiplexer, util::prefixed};
+use crate::shell::shell_quote;
 use crate::{cmd, git};
 use tracing::{debug, info, warn};
+
+// Re-export for use by other modules in the workflow
+pub use git::get_worktree_mode;
 
 use super::context::WorkflowContext;
 use super::types::{CleanupResult, DeferredCleanup};
@@ -50,13 +55,20 @@ fn find_matching_windows(mux: &dyn Multiplexer, prefix: &str, handle: &str) -> R
     Ok(matching)
 }
 
-/// Check if the current window matches the base handle pattern (including duplicates).
-fn is_inside_matching_window(
+/// Check if the current window/session matches the base handle pattern (including duplicates).
+fn is_inside_matching_target(
     mux: &dyn Multiplexer,
     prefix: &str,
     handle: &str,
+    mode: MuxMode,
 ) -> Result<Option<String>> {
-    let current_window = match mux.current_window_name()? {
+    let current_name = if mode == MuxMode::Session {
+        mux.current_session()
+    } else {
+        mux.current_window_name()?
+    };
+
+    let current_name = match current_name {
         Some(name) => name,
         None => return Ok(None),
     };
@@ -66,8 +78,8 @@ fn is_inside_matching_window(
     let pattern = format!(r"^{}(-\d+)?$", escaped_base);
     let re = Regex::new(&pattern).expect("Invalid regex pattern");
 
-    if re.is_match(&current_window) {
-        Ok(Some(current_window))
+    if re.is_match(&current_name) {
+        Ok(Some(current_name))
     } else {
         Ok(None)
     }
@@ -75,7 +87,7 @@ fn is_inside_matching_window(
 
 /// Centralized function to clean up tmux and git resources.
 /// `branch_name` is used for git operations (branch deletion).
-/// `handle` is used for tmux operations (window lookup/kill).
+/// `handle` is used for tmux operations (window/session lookup/kill).
 pub fn cleanup(
     context: &WorkflowContext,
     branch_name: &str,
@@ -85,12 +97,18 @@ pub fn cleanup(
     keep_branch: bool,
     no_hooks: bool,
 ) -> Result<CleanupResult> {
+    // Determine if this worktree was created as a session or window
+    let mode = get_worktree_mode(handle);
+    let is_session_mode = mode == MuxMode::Session;
+    let kind = crate::multiplexer::handle::mode_label(mode);
+
     info!(
         branch = branch_name,
         handle = handle,
         path = %worktree_path.display(),
         force,
         keep_branch,
+        mode = kind,
         "cleanup:start"
     );
     // Change the CWD to main worktree before any destructive operations.
@@ -100,13 +118,13 @@ pub fn cleanup(
 
     let mux_running = context.mux.is_running().unwrap_or(false);
 
-    // Check if we're running inside ANY matching window (original or duplicate)
-    let current_matching_window = if mux_running {
-        is_inside_matching_window(context.mux.as_ref(), &context.prefix, handle)?
+    // Check if we're running inside ANY matching target (original or duplicate)
+    let current_matching_target = if mux_running {
+        is_inside_matching_target(context.mux.as_ref(), &context.prefix, handle, mode)?
     } else {
         None
     };
-    let running_inside_target_window = current_matching_window.is_some();
+    let running_inside_target = current_matching_target.is_some();
 
     let mut result = CleanupResult {
         tmux_window_killed: false,
@@ -271,21 +289,23 @@ pub fn cleanup(
         Ok(())
     };
 
-    if running_inside_target_window {
-        let current_window = current_matching_window.unwrap();
+    if running_inside_target {
+        let current_target = current_matching_target.unwrap();
         info!(
             branch = branch_name,
-            current_window = current_window,
-            "cleanup:running inside matching window, deferring destructive cleanup"
+            current_target = current_target,
+            kind,
+            "cleanup:running inside matching target, deferring destructive cleanup",
         );
 
         // Find and kill all OTHER matching windows (not the current one)
-        if mux_running {
+        // Note: Sessions don't have duplicates like windows, so skip for session mode
+        if mux_running && !is_session_mode {
             let matching_windows =
                 find_matching_windows(context.mux.as_ref(), &context.prefix, handle)?;
             let mut killed_count = 0;
             for window in &matching_windows {
-                if window != &current_window {
+                if window != &current_target {
                     if let Err(e) = context.mux.kill_window(window) {
                         warn!(window = window, error = %e, "cleanup:failed to kill duplicate window");
                     } else {
@@ -295,12 +315,15 @@ pub fn cleanup(
                 }
             }
             if killed_count > 0 {
-                info!(count = killed_count, "cleanup:killed duplicate windows");
+                info!(
+                    count = killed_count,
+                    kind, "cleanup:killed duplicate {}s", kind
+                );
             }
         }
 
-        // Store the current window name for deferred close
-        result.window_to_close_later = Some(current_window);
+        // Store the current window/session name for deferred close
+        result.window_to_close_later = Some(current_target);
 
         // Run pre-remove hooks synchronously (they need the worktree intact)
         // Skip if --no-hooks is set (e.g., RPC-triggered merge).
@@ -353,7 +376,7 @@ pub fn cleanup(
             }
         }
 
-        // Defer destructive operations (rename, prune, branch delete) until after window close.
+        // Defer destructive operations (rename, prune, branch delete) until after window/session close.
         // This keeps the worktree path valid so agents can run their hooks.
         if worktree_path.exists() {
             let parent = worktree_path.parent().unwrap_or_else(|| Path::new("."));
@@ -375,55 +398,131 @@ pub fn cleanup(
                 worktree_path: worktree_path.to_path_buf(),
                 trash_path,
                 branch_name: branch_name.to_string(),
+                handle: handle.to_string(),
                 keep_branch,
                 force,
                 git_common_dir: context.git_common_dir.clone(),
             });
             debug!(
                 worktree = %worktree_path.display(),
-                "cleanup:deferred destructive cleanup until window close"
+                kind,
+                "cleanup:deferred destructive cleanup until target close",
             );
         }
     } else {
-        // Not running inside any matching window, so kill ALL matching windows first
+        // Not running inside any matching target, so kill it first
         if mux_running {
-            let matching_windows =
-                find_matching_windows(context.mux.as_ref(), &context.prefix, handle)?;
-            let mut killed_count = 0;
-            for window in &matching_windows {
-                if let Err(e) = context.mux.kill_window(window) {
-                    warn!(window = window, error = %e, "cleanup:failed to kill window");
-                } else {
-                    killed_count += 1;
-                    debug!(window = window, "cleanup:killed window");
-                }
-            }
-            if killed_count > 0 {
-                result.tmux_window_killed = true;
-                info!(
-                    count = killed_count,
-                    handle = handle,
-                    "cleanup:killed all matching windows"
-                );
+            if is_session_mode {
+                // For session mode, kill the session directly
+                let session_name = prefixed(&context.prefix, handle);
+                if context.mux.session_exists(&session_name)? {
+                    if let Err(e) = context.mux.kill_session(&session_name) {
+                        warn!(session = session_name, error = %e, "cleanup:failed to kill session");
+                    } else {
+                        result.tmux_window_killed = true;
+                        info!(session = session_name, "cleanup:killed session");
 
-                // Poll to confirm windows are gone before proceeding
-                const MAX_RETRIES: u32 = 20;
-                const RETRY_DELAY: Duration = Duration::from_millis(50);
-                for _ in 0..MAX_RETRIES {
-                    let remaining =
-                        find_matching_windows(context.mux.as_ref(), &context.prefix, handle)?;
-                    if remaining.is_empty() {
-                        break;
+                        // Poll to confirm session is gone before proceeding
+                        const MAX_RETRIES: u32 = 20;
+                        const RETRY_DELAY: Duration = Duration::from_millis(50);
+                        for _ in 0..MAX_RETRIES {
+                            if !context.mux.session_exists(&session_name)? {
+                                break;
+                            }
+                            thread::sleep(RETRY_DELAY);
+                        }
                     }
-                    thread::sleep(RETRY_DELAY);
+                }
+            } else {
+                // For window mode, find and kill all matching windows (including duplicates)
+                let matching_windows =
+                    find_matching_windows(context.mux.as_ref(), &context.prefix, handle)?;
+                let mut killed_count = 0;
+                for window in &matching_windows {
+                    if let Err(e) = context.mux.kill_window(window) {
+                        warn!(window = window, error = %e, "cleanup:failed to kill window");
+                    } else {
+                        killed_count += 1;
+                        debug!(window = window, "cleanup:killed window");
+                    }
+                }
+                if killed_count > 0 {
+                    result.tmux_window_killed = true;
+                    info!(
+                        count = killed_count,
+                        handle = handle,
+                        "cleanup:killed all matching windows"
+                    );
+
+                    // Poll to confirm windows are gone before proceeding
+                    const MAX_RETRIES: u32 = 20;
+                    const RETRY_DELAY: Duration = Duration::from_millis(50);
+                    for _ in 0..MAX_RETRIES {
+                        let remaining =
+                            find_matching_windows(context.mux.as_ref(), &context.prefix, handle)?;
+                        if remaining.is_empty() {
+                            break;
+                        }
+                        thread::sleep(RETRY_DELAY);
+                    }
                 }
             }
         }
-        // Now that windows are gone, clean up filesystem and git state.
+        // Now that windows/sessions are gone, clean up filesystem and git state.
         perform_fs_git_cleanup(&mut result)?;
     }
 
+    // Clean up worktree metadata from git config.
+    // Only remove immediately when not deferring -- deferred cleanup includes this
+    // in the shell script so metadata survives if the deferred script fails.
+    if result.deferred_cleanup.is_none()
+        && let Err(e) = git::remove_worktree_meta(handle)
+    {
+        warn!(handle = handle, error = %e, "cleanup:failed to remove worktree metadata");
+    }
+
     Ok(result)
+}
+
+/// Build the deferred cleanup script for rename, prune, branch delete, and trash removal.
+///
+/// Generates a semicolon-separated sequence of shell commands that:
+/// 1. Renames the worktree directory to a trash path (frees the original path)
+/// 2. Prunes git worktree metadata
+/// 3. Deletes the local branch (unless `keep_branch` is set)
+/// 4. Removes workmux worktree metadata from git config
+/// 5. Deletes the trash directory
+///
+/// The returned string starts with "; " so it can be appended to other commands.
+fn build_deferred_cleanup_script(dc: &DeferredCleanup) -> String {
+    let wt = shell_quote(&dc.worktree_path.to_string_lossy());
+    let trash = shell_quote(&dc.trash_path.to_string_lossy());
+    let git_dir = shell_quote(&dc.git_common_dir.to_string_lossy());
+
+    let mut cmds = Vec::new();
+    // 1. Rename worktree to trash
+    cmds.push(format!("mv {} {} >/dev/null 2>&1", wt, trash));
+    // 2. Prune git worktrees
+    cmds.push(format!("git -C {} worktree prune >/dev/null 2>&1", git_dir));
+    // 3. Delete branch (if not keeping)
+    if !dc.keep_branch {
+        let branch = shell_quote(&dc.branch_name);
+        let force_flag = if dc.force { "-D" } else { "-d" };
+        cmds.push(format!(
+            "git -C {} branch {} {} >/dev/null 2>&1",
+            git_dir, force_flag, branch
+        ));
+    }
+    // 4. Remove worktree metadata from git config
+    let handle = shell_quote(&dc.handle);
+    cmds.push(format!(
+        "git -C {} config --local --remove-section workmux.worktree.{} >/dev/null 2>&1",
+        git_dir, handle
+    ));
+    // 5. Delete trash
+    cmds.push(format!("rm -rf {} >/dev/null 2>&1", trash));
+
+    format!("; {}", cmds.join("; "))
 }
 
 /// Navigate to the target branch window and close the source window.
@@ -436,51 +535,30 @@ pub fn navigate_to_target_and_close(
     target_window_name: &str,
     source_handle: &str,
     cleanup_result: &CleanupResult,
+    mode: MuxMode,
 ) -> Result<()> {
-    use crate::shell::shell_quote as shell_escape;
+    use crate::multiplexer::MuxHandle;
 
-    /// Build the deferred cleanup script for rename, prune, branch delete, and trash removal.
-    fn build_deferred_cleanup_script(dc: &DeferredCleanup) -> String {
-        let wt = shell_escape(&dc.worktree_path.to_string_lossy());
-        let trash = shell_escape(&dc.trash_path.to_string_lossy());
-        let git_dir = shell_escape(&dc.git_common_dir.to_string_lossy());
-
-        let mut cmds = Vec::new();
-        // 1. Rename worktree to trash
-        cmds.push(format!("mv {} {} >/dev/null 2>&1", wt, trash));
-        // 2. Prune git worktrees
-        cmds.push(format!("git -C {} worktree prune >/dev/null 2>&1", git_dir));
-        // 3. Delete branch (if not keeping)
-        if !dc.keep_branch {
-            let branch = shell_escape(&dc.branch_name);
-            let force_flag = if dc.force { "-D" } else { "-d" };
-            cmds.push(format!(
-                "git -C {} branch {} {} >/dev/null 2>&1",
-                git_dir, force_flag, branch
-            ));
-        }
-        // 4. Delete trash
-        cmds.push(format!("rm -rf {} >/dev/null 2>&1", trash));
-
-        format!("; {}", cmds.join("; "))
-    }
-
-    // Check if target window exists
+    // Check if target window/session exists (probe both modes since target
+    // may be a different mode than source, e.g. session worktree -> window main)
     let mux_running = mux.is_running()?;
-    let target_exists = if mux_running {
-        mux.window_exists(prefix, target_window_name)?
+    let target_full = prefixed(prefix, target_window_name);
+    let (target_exists, target_mode) = if mux_running {
+        let is_session = mux.session_exists(&target_full).unwrap_or(false);
+        let is_window = mux
+            .window_exists_by_full_name(&target_full)
+            .unwrap_or(false);
+        if is_session {
+            (true, MuxMode::Session)
+        } else if is_window {
+            (true, MuxMode::Window)
+        } else {
+            (false, mode) // doesn't matter, target doesn't exist
+        }
     } else {
-        false
+        (false, mode)
     };
-    debug!(
-        prefix = prefix,
-        target_window_name = target_window_name,
-        mux_running = mux_running,
-        target_exists = target_exists,
-        window_to_close = ?cleanup_result.window_to_close_later,
-        deferred_cleanup = cleanup_result.deferred_cleanup.is_some(),
-        "navigate_to_target_and_close:entry"
-    );
+    let kind = crate::multiplexer::handle::mode_label(mode);
 
     // Prepare window names for shell commands
     // Use the actual window name from window_to_close_later when available (includes -N suffix),
@@ -489,11 +567,22 @@ pub fn navigate_to_target_and_close(
         .window_to_close_later
         .clone()
         .unwrap_or_else(|| prefixed(prefix, source_handle));
-    let target_full = prefixed(prefix, target_window_name);
 
-    // Generate backend-specific shell commands for deferred scripts
-    let kill_source_cmd = mux.shell_kill_window_cmd(&source_full).ok();
-    let select_target_cmd = mux.shell_select_window_cmd(&target_full).ok();
+    // Generate backend-specific shell commands for deferred scripts.
+    // Kill uses source mode, select uses target's detected mode.
+    let kill_source_cmd = MuxHandle::shell_kill_cmd_full(mux, mode, &source_full).ok();
+    let select_target_cmd = MuxHandle::shell_select_cmd_full(mux, target_mode, &target_full).ok();
+
+    debug!(
+        prefix = prefix,
+        target_window_name = target_window_name,
+        mux_running = mux_running,
+        target_exists = target_exists,
+        kind,
+        window_to_close = ?cleanup_result.window_to_close_later,
+        deferred_cleanup = cleanup_result.deferred_cleanup.is_some(),
+        "navigate_to_target_and_close:entry"
+    );
 
     if !mux_running || !target_exists {
         // If target window doesn't exist, still need to close source window if running inside it
@@ -508,8 +597,20 @@ pub fn navigate_to_target_and_close(
                 cleanup_result
                     .trash_path_to_delete
                     .as_ref()
-                    .map(|tp| format!("; rm -rf {}", shell_escape(&tp.to_string_lossy())))
+                    .map(|tp| format!("; rm -rf {}", shell_quote(&tp.to_string_lossy())))
                     .unwrap_or_default()
+            };
+
+            // For session mode, switch to the last session before killing so
+            // the client returns to where the user was previously instead of
+            // tmux picking an arbitrary session.
+            let switch_last_part = if mode == MuxMode::Session {
+                mux.shell_switch_to_last_session_cmd()
+                    .ok()
+                    .map(|cmd| format!("{}; ", cmd))
+                    .unwrap_or_default()
+            } else {
+                String::new()
             };
 
             let kill_part = kill_source_cmd
@@ -518,25 +619,28 @@ pub fn navigate_to_target_and_close(
                 .unwrap_or_default();
 
             let script = format!(
-                "sleep {delay}; {kill}{cleanup}",
+                "sleep {delay}; {switch}{kill}{cleanup}",
                 delay = delay_secs,
+                switch = switch_last_part,
                 kill = kill_part,
                 cleanup = cleanup_script.strip_prefix("; ").unwrap_or(&cleanup_script),
             );
             debug!(
                 script = script,
-                "navigate_to_target_and_close:kill_only_script"
+                kind, "navigate_to_target_and_close:kill_only_script"
             );
             match mux.run_deferred_script(&script) {
                 Ok(_) => info!(
-                    window = window_to_close,
+                    target = window_to_close,
                     script = script,
-                    "cleanup:scheduled window close"
+                    kind,
+                    "cleanup:scheduled target close",
                 ),
                 Err(e) => warn!(
-                    window = window_to_close,
+                    target = window_to_close,
                     error = ?e,
-                    "cleanup:failed to schedule window close",
+                    kind,
+                    "cleanup:failed to schedule target close",
                 ),
             }
         }
@@ -555,10 +659,11 @@ pub fn navigate_to_target_and_close(
             cleanup_result
                 .trash_path_to_delete
                 .as_ref()
-                .map(|tp| format!("; rm -rf {}", shell_escape(&tp.to_string_lossy())))
+                .map(|tp| format!("; rm -rf {}", shell_quote(&tp.to_string_lossy())))
                 .unwrap_or_default()
         };
 
+        // Navigate to target window before killing source
         let select_part = select_target_cmd
             .as_ref()
             .map(|cmd| format!("{}; ", cmd))
@@ -578,31 +683,242 @@ pub fn navigate_to_target_and_close(
         );
         debug!(
             script = script,
-            "navigate_to_target_and_close:nav_and_kill_script"
+            kind, "navigate_to_target_and_close:nav_and_kill_script"
         );
 
         match mux.run_deferred_script(&script) {
             Ok(_) => info!(
                 source = source_handle,
                 target = target_window_name,
-                "cleanup:scheduled navigation to target and window close"
+                kind,
+                "cleanup:scheduled navigation to target and source close",
             ),
             Err(e) => warn!(
                 source = source_handle,
                 error = ?e,
-                "cleanup:failed to schedule navigation and window close",
+                kind,
+                "cleanup:failed to schedule navigation and source close",
             ),
         }
     } else if !cleanup_result.tmux_window_killed {
-        // Running outside and windows weren't killed yet (shouldn't happen normally)
+        // Running outside and targets weren't killed yet (shouldn't happen normally)
         // but handle it for completeness
-        mux.select_window(prefix, target_window_name)?;
+        let target = MuxHandle::new(mux, target_mode, prefix, target_window_name);
+        target.select()?;
         info!(
             handle = source_handle,
             target = target_window_name,
-            "cleanup:navigated to target branch window"
+            kind,
+            "cleanup:navigated to target branch",
         );
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn make_deferred_cleanup(
+        worktree: &str,
+        trash: &str,
+        branch: &str,
+        handle: &str,
+        git_dir: &str,
+        keep_branch: bool,
+        force: bool,
+    ) -> DeferredCleanup {
+        DeferredCleanup {
+            worktree_path: PathBuf::from(worktree),
+            trash_path: PathBuf::from(trash),
+            branch_name: branch.to_string(),
+            handle: handle.to_string(),
+            keep_branch,
+            force,
+            git_common_dir: PathBuf::from(git_dir),
+        }
+    }
+
+    #[test]
+    fn deferred_cleanup_script_includes_all_steps() {
+        let dc = make_deferred_cleanup(
+            "/repo/worktrees/feature",
+            "/repo/worktrees/.workmux_trash_feature_123",
+            "feature",
+            "feature",
+            "/repo/.git",
+            false,
+            false,
+        );
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        assert!(script.contains(
+            "mv /repo/worktrees/feature /repo/worktrees/.workmux_trash_feature_123 >/dev/null 2>&1"
+        ));
+        assert!(script.contains("git -C /repo/.git worktree prune >/dev/null 2>&1"));
+        assert!(script.contains("git -C /repo/.git branch -d feature >/dev/null 2>&1"));
+        assert!(script.contains("git -C /repo/.git config --local --remove-section workmux.worktree.feature >/dev/null 2>&1"));
+        assert!(
+            script.contains("rm -rf /repo/worktrees/.workmux_trash_feature_123 >/dev/null 2>&1")
+        );
+    }
+
+    #[test]
+    fn deferred_cleanup_script_keep_branch_skips_branch_delete() {
+        let dc = make_deferred_cleanup(
+            "/repo/worktrees/feature",
+            "/repo/worktrees/.trash",
+            "feature",
+            "feature",
+            "/repo/.git",
+            true, // keep_branch
+            false,
+        );
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        assert!(
+            !script.contains("branch -d"),
+            "Should not delete branch when keep_branch is set"
+        );
+        assert!(
+            !script.contains("branch -D"),
+            "Should not delete branch when keep_branch is set"
+        );
+        // Other steps should still be present
+        assert!(script.contains("mv "));
+        assert!(script.contains("worktree prune"));
+        assert!(script.contains("config --local --remove-section"));
+        assert!(script.contains("rm -rf"));
+    }
+
+    #[test]
+    fn deferred_cleanup_script_force_uses_capital_d() {
+        let dc = make_deferred_cleanup(
+            "/repo/worktrees/feature",
+            "/repo/worktrees/.trash",
+            "feature",
+            "feature",
+            "/repo/.git",
+            false,
+            true, // force
+        );
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        assert!(
+            script.contains("branch -D feature"),
+            "Force delete should use -D flag"
+        );
+        assert!(
+            !script.contains("branch -d feature"),
+            "Force delete should not use -d flag"
+        );
+    }
+
+    #[test]
+    fn deferred_cleanup_script_quotes_paths_with_spaces() {
+        let dc = make_deferred_cleanup(
+            "/my repo/worktrees/my feature",
+            "/my repo/worktrees/.trash_123",
+            "my-feature",
+            "my-feature",
+            "/my repo/.git",
+            false,
+            false,
+        );
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        assert!(
+            script.contains("'/my repo/worktrees/my feature'"),
+            "Worktree path with spaces should be quoted: {script}"
+        );
+        assert!(
+            script.contains("'/my repo/worktrees/.trash_123'"),
+            "Trash path with spaces should be quoted: {script}"
+        );
+        assert!(
+            script.contains("'/my repo/.git'"),
+            "Git dir with spaces should be quoted: {script}"
+        );
+    }
+
+    #[test]
+    fn deferred_cleanup_script_preserves_command_order() {
+        let dc = make_deferred_cleanup(
+            "/repo/wt/feat",
+            "/repo/wt/.trash",
+            "feat",
+            "feat",
+            "/repo/.git",
+            false,
+            false,
+        );
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        // Commands must execute in this order for correctness:
+        // mv (free original path) -> prune (update git metadata) ->
+        // branch delete -> config remove -> rm (delete trash)
+        let mv_pos = script.find("mv ").expect("should contain mv");
+        let prune_pos = script.find("worktree prune").expect("should contain prune");
+        let branch_pos = script.find("branch -d").expect("should contain branch -d");
+        let config_pos = script
+            .find("config --local --remove-section")
+            .expect("should contain config remove");
+        let rm_pos = script.find("rm -rf").expect("should contain rm -rf");
+
+        assert!(mv_pos < prune_pos, "mv should precede prune");
+        assert!(prune_pos < branch_pos, "prune should precede branch delete");
+        assert!(
+            branch_pos < config_pos,
+            "branch delete should precede config remove"
+        );
+        assert!(config_pos < rm_pos, "config remove should precede rm");
+    }
+
+    #[test]
+    fn deferred_cleanup_script_starts_with_separator() {
+        let dc = make_deferred_cleanup(
+            "/repo/wt/feat",
+            "/repo/wt/.trash",
+            "feat",
+            "feat",
+            "/repo/.git",
+            false,
+            false,
+        );
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        assert!(
+            script.starts_with("; "),
+            "Script should start with '; ' so it can be appended to other commands: {script}"
+        );
+    }
+
+    #[test]
+    fn deferred_cleanup_script_simple_paths_not_quoted() {
+        let dc = make_deferred_cleanup(
+            "/repo/worktrees/feature-branch",
+            "/repo/worktrees/.trash_feature",
+            "feature-branch",
+            "feature-branch",
+            "/repo/.git",
+            false,
+            false,
+        );
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        // Simple paths (alphanumeric, dash, underscore, dot, slash) should not be quoted
+        assert!(
+            script.contains("mv /repo/worktrees/feature-branch /repo/worktrees/.trash_feature"),
+            "Simple paths should not be quoted: {script}"
+        );
+    }
 }
