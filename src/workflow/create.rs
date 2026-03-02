@@ -326,8 +326,8 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         // Continue anyway - this is non-fatal
     }
 
-    // Spawn background session capture if enabled
-    if context.config.claude.capture_sessions {
+    // Register repo path for restore --all discovery
+    {
         let repo_name = context
             .main_worktree_root
             .file_name()
@@ -336,15 +336,6 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
 
         if let Err(e) = claude::store_repo_path(repo_name, &context.main_worktree_root) {
             warn!(error = %e, "Failed to store repo path");
-        }
-
-        if let Err(e) = claude::spawn_session_capture(
-            repo_name,
-            branch_name,
-            context.config.claude.capture_timeout,
-        ) {
-            warn!(error = %e, "Failed to spawn session capture");
-            // Continue anyway - this is non-fatal
         }
     }
 

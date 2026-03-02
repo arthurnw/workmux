@@ -2,9 +2,8 @@ pub mod session;
 pub mod trust;
 
 pub use session::{
-    capture_latest_session, get_session, get_tmux_session, list_all_repos, list_sessions,
-    remove_session, run_capture_loop, spawn_session_capture, store_repo_path, store_session,
-    store_tmux_session,
+    find_latest_project_session, get_tmux_session, list_all_repos, list_sessions_for_worktrees,
+    store_repo_path, store_tmux_session,
 };
 pub use trust::{trust_directory, untrust_directory};
 

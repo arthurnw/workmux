@@ -1,18 +1,13 @@
-//! Claude Code session ID capture and storage.
+//! Claude Code session management.
 //!
-//! Sessions are stored at: `~/.local/state/workmux/sessions/<repo>/<branch>/session_id`
-//!
-//! The capture mechanism works by monitoring `~/.claude/session-env/` for new directories,
-//! which are created by Claude Code when a new session starts.
+//! Session IDs are discovered by scanning `~/.claude/projects/<encoded-path>/`
+//! for `.jsonl` files whose stems are valid UUIDs.
 
 use anyhow::{Context, Result};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Information about a stored session.
 #[derive(Debug, Clone)]
@@ -43,137 +38,19 @@ pub fn get_sessions_dir() -> Result<PathBuf> {
     Ok(get_state_dir()?.join("workmux").join("sessions"))
 }
 
-/// Get the path for a specific session file.
-///
-/// Returns: `~/.local/state/workmux/sessions/<repo>/<branch>/session_id`
-pub fn get_session_path(repo: &str, branch: &str) -> Result<PathBuf> {
-    Ok(get_sessions_dir()?
-        .join(repo)
-        .join(branch)
-        .join("session_id"))
-}
-
-/// Store a session ID for a repo/branch combination.
-///
-/// Creates the directory structure if it doesn't exist.
-/// Uses atomic write for crash safety.
-pub fn store_session(repo: &str, branch: &str, session_id: &str) -> Result<()> {
-    let path = get_session_path(repo, branch)?;
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create session directory: {}", parent.display()))?;
-    }
-
-    // Atomic write: temp file + rename
-    let tmp_path = path.with_extension("tmp");
-    fs::write(&tmp_path, session_id)
-        .with_context(|| format!("Failed to write temp session file: {}", tmp_path.display()))?;
-
-    fs::rename(&tmp_path, &path)
-        .with_context(|| format!("Failed to rename session file: {}", path.display()))?;
-
-    info!(repo, branch, session_id, "Stored session ID");
-    Ok(())
-}
-
-/// Retrieve a stored session ID for a repo/branch combination.
-///
-/// Returns None if no session is stored.
-pub fn get_session(repo: &str, branch: &str) -> Result<Option<String>> {
-    let path = get_session_path(repo, branch)?;
-
-    match fs::read_to_string(&path) {
-        Ok(content) => {
-            let session_id = content.trim().to_string();
-            if session_id.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(session_id))
-            }
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => {
-            Err(e).with_context(|| format!("Failed to read session file: {}", path.display()))
-        }
-    }
-}
-
-/// Remove session data for a repo/branch combination.
-///
-/// No-op if the session doesn't exist.
-/// Also removes empty parent directories.
-pub fn remove_session(repo: &str, branch: &str) -> Result<()> {
-    let path = get_session_path(repo, branch)?;
-
-    match fs::remove_file(&path) {
-        Ok(()) => {
-            debug!(repo, branch, "Removed session file");
-            // Try to clean up empty directories
-            if let Some(branch_dir) = path.parent() {
-                let _ = fs::remove_dir(branch_dir); // Ignore errors (may not be empty)
-                if let Some(repo_dir) = branch_dir.parent() {
-                    // If no branch subdirectories remain, remove repo_path too
-                    let has_branch_dirs = fs::read_dir(repo_dir)
-                        .ok()
-                        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| e.path().is_dir()))
-                        .unwrap_or(false);
-
-                    if !has_branch_dirs {
-                        let repo_path_file = repo_dir.join("repo_path");
-                        let _ = fs::remove_file(&repo_path_file);
-                        debug!(repo, "Removed repo_path file (no branch dirs remain)");
-                    }
-
-                    let _ = fs::remove_dir(repo_dir); // Ignore errors
-                }
-            }
-            Ok(())
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e).context("Failed to remove session file"),
-    }
-}
-
-/// List all sessions for a repository.
-///
-/// Returns session info for all branches that have session directories.
-pub fn list_sessions(repo: &str) -> Result<Vec<SessionInfo>> {
-    let repo_dir = get_sessions_dir()?.join(repo);
-
-    if !repo_dir.exists() {
-        return Ok(Vec::new());
-    }
-
+/// Build session info for a set of worktrees by querying Claude project dirs.
+pub fn list_sessions_for_worktrees(worktrees: &[(PathBuf, String)]) -> Result<Vec<SessionInfo>> {
     let mut sessions = Vec::new();
 
-    for entry in fs::read_dir(&repo_dir)
-        .with_context(|| format!("Failed to read sessions directory: {}", repo_dir.display()))?
-    {
-        let entry = entry?;
-        let branch_path = entry.path();
-
-        if !branch_path.is_dir() {
-            continue;
-        }
-
-        let branch = entry.file_name().to_string_lossy().to_string();
-
-        let session_id_path = branch_path.join("session_id");
-        let session_id = match fs::read_to_string(&session_id_path) {
-            Ok(content) => {
-                let id = content.trim().to_string();
-                if id.is_empty() { None } else { Some(id) }
-            }
-            Err(_) => None,
-        };
-
-        sessions.push(SessionInfo { branch, session_id });
+    for (wt_path, branch) in worktrees {
+        let session_id = find_latest_project_session(wt_path)?;
+        sessions.push(SessionInfo {
+            branch: branch.clone(),
+            session_id,
+        });
     }
 
-    // Sort by branch name for consistent output
     sessions.sort_by(|a, b| a.branch.cmp(&b.branch));
-
     Ok(sessions)
 }
 
@@ -333,232 +210,85 @@ pub fn is_valid_uuid(s: &str) -> bool {
     true
 }
 
-/// Get the Claude session-env directory path.
+/// Encode a filesystem path the way Claude Code encodes project directories.
 ///
-/// Returns: `~/.claude/session-env`
-fn get_claude_session_env_dir() -> Option<PathBuf> {
-    home::home_dir().map(|h| h.join(".claude").join("session-env"))
+/// Replaces `/`, `_`, and `.` with `-`, producing names like `-Users-anw-code-workmux`.
+pub fn encode_path_for_claude_projects(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    s.chars()
+        .map(|c| match c {
+            '/' | '_' | '.' => '-',
+            _ => c,
+        })
+        .collect()
 }
 
-/// Count the number of session directories in `~/.claude/session-env/`.
-pub fn count_session_dirs() -> Result<usize> {
-    let session_env_dir = get_claude_session_env_dir()
+/// Get the Claude projects directory path.
+///
+/// Returns: `~/.claude/projects`
+fn get_claude_projects_dir() -> Option<PathBuf> {
+    home::home_dir().map(|h| h.join(".claude").join("projects"))
+}
+
+/// Find the latest Claude session for a worktree by scanning project directory.
+///
+/// Looks in `~/.claude/projects/<encoded-path>/` for `.jsonl` files and
+/// returns the UUID (filename stem) of the most recently modified one.
+pub fn find_latest_project_session(worktree_path: &Path) -> Result<Option<String>> {
+    let projects_dir = get_claude_projects_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
 
-    if !session_env_dir.exists() {
-        return Ok(0);
-    }
-
-    let count = fs::read_dir(&session_env_dir)
-        .with_context(|| {
-            format!(
-                "Failed to read session-env directory: {}",
-                session_env_dir.display()
-            )
-        })?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .count();
-
-    Ok(count)
+    find_latest_project_session_in(&projects_dir, worktree_path)
 }
 
-/// Spawn a detached subprocess to capture the Claude session ID.
-///
-/// Uses self re-exec with `_internal capture-session` command.
-/// The subprocess will:
-/// 1. Wait 5 seconds for Claude to start
-/// 2. Poll `~/.claude/session-env/` every 2 seconds
-/// 3. When a new directory appears, extract and store the session ID
-/// 4. Exit after timeout or success
-#[cfg(unix)]
-pub fn spawn_session_capture(repo: &str, branch: &str, timeout_secs: u32) -> Result<()> {
-    use std::os::unix::process::CommandExt;
+/// Testable inner function that accepts a custom projects base directory.
+fn find_latest_project_session_in(
+    projects_base: &Path,
+    worktree_path: &Path,
+) -> Result<Option<String>> {
+    let encoded = encode_path_for_claude_projects(worktree_path);
+    let project_dir = projects_base.join(&encoded);
 
-    let initial_count = count_session_dirs()?;
-    let exe = std::env::current_exe().context("Failed to get current executable path")?;
-
-    debug!(
-        repo,
-        branch, initial_count, timeout_secs, "Spawning session capture subprocess"
-    );
-
-    let mut cmd = Command::new(&exe);
-    cmd.arg("_internal")
-        .arg("capture-session")
-        .arg("--repo")
-        .arg(repo)
-        .arg("--branch")
-        .arg(branch)
-        .arg("--initial-count")
-        .arg(initial_count.to_string())
-        .arg("--timeout")
-        .arg(timeout_secs.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    // SAFETY: setsid() creates a new session, detaching from the terminal.
-    // This is safe to call in a pre_exec hook.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-
-    cmd.spawn()
-        .context("Failed to spawn session capture subprocess")?;
-
-    Ok(())
-}
-
-/// Non-Unix fallback - just spawn without detaching.
-#[cfg(not(unix))]
-pub fn spawn_session_capture(repo: &str, branch: &str, timeout_secs: u32) -> Result<()> {
-    let initial_count = count_session_dirs()?;
-    let exe = std::env::current_exe().context("Failed to get current executable path")?;
-
-    debug!(
-        repo,
-        branch, initial_count, timeout_secs, "Spawning session capture subprocess"
-    );
-
-    Command::new(&exe)
-        .arg("_internal")
-        .arg("capture-session")
-        .arg("--repo")
-        .arg(repo)
-        .arg("--branch")
-        .arg(branch)
-        .arg("--initial-count")
-        .arg(initial_count.to_string())
-        .arg("--timeout")
-        .arg(timeout_secs.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("Failed to spawn session capture subprocess")?;
-
-    Ok(())
-}
-
-/// Run the capture loop to detect and store a new Claude session ID.
-///
-/// This is called by the `_internal capture-session` command.
-///
-/// Algorithm:
-/// 1. Wait 5 seconds for Claude to start
-/// 2. Poll `~/.claude/session-env/` every 2 seconds
-/// 3. When count > initial_count, find the newest directory
-/// 4. Validate the directory name is a UUID
-/// 5. Store the session ID
-/// 6. Exit after success or timeout
-pub fn run_capture_loop(
-    repo: &str,
-    branch: &str,
-    initial_count: usize,
-    timeout_secs: u32,
-) -> Result<()> {
-    let session_env_dir = get_claude_session_env_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-
-    // Initial delay for Claude to start
-    info!(
-        repo,
-        branch,
-        initial_count,
-        timeout_secs,
-        "Starting session capture, waiting 5s for Claude to start"
-    );
-    thread::sleep(Duration::from_secs(5));
-
-    let poll_interval = Duration::from_secs(2);
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(timeout_secs as u64);
-
-    while start.elapsed() < timeout {
-        let current_count = count_session_dirs().unwrap_or(0);
-        debug!(current_count, initial_count, "Polling session-env");
-
-        if current_count > initial_count {
-            // Find the newest session directory
-            if let Some(session_id) = find_latest_session_id(&session_env_dir)? {
-                if is_valid_uuid(&session_id) {
-                    store_session(repo, branch, &session_id)?;
-                    info!(repo, branch, session_id, "Session ID captured successfully");
-                    return Ok(());
-                } else {
-                    warn!(
-                        session_id,
-                        "Found directory is not a valid UUID, continuing to poll"
-                    );
-                }
-            }
-        }
-
-        thread::sleep(poll_interval);
-    }
-
-    warn!(repo, branch, "Session capture timed out");
-    Ok(())
-}
-
-/// Find the most recent session directory in `~/.claude/session-env/`.
-fn find_latest_session_id(session_env_dir: &PathBuf) -> Result<Option<String>> {
-    if !session_env_dir.exists() {
+    if !project_dir.exists() {
         return Ok(None);
     }
 
     let mut latest: Option<(std::time::SystemTime, String)> = None;
 
-    for entry in fs::read_dir(session_env_dir)? {
+    for entry in fs::read_dir(&project_dir)? {
         let entry = entry?;
         let path = entry.path();
 
-        if !path.is_dir() {
+        // Only consider .jsonl files
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
 
-        let name = entry.file_name().to_string_lossy().to_string();
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
 
-        // Get modification time
+        if !is_valid_uuid(&stem) {
+            continue;
+        }
+
         if let Ok(metadata) = path.metadata()
             && let Ok(modified) = metadata.modified()
         {
             match &latest {
                 Some((latest_time, _)) if modified > *latest_time => {
-                    latest = Some((modified, name));
+                    latest = Some((modified, stem));
                 }
                 None => {
-                    latest = Some((modified, name));
+                    latest = Some((modified, stem));
                 }
                 _ => {}
             }
         }
     }
 
-    Ok(latest.map(|(_, name)| name))
-}
-
-/// Auto-detect and capture the most recent Claude session ID.
-///
-/// Used by `workmux session capture` when no session ID is provided.
-pub fn capture_latest_session(repo: &str, branch: &str) -> Result<Option<String>> {
-    let session_env_dir = get_claude_session_env_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-
-    if let Some(session_id) = find_latest_session_id(&session_env_dir)? {
-        if is_valid_uuid(&session_id) {
-            store_session(repo, branch, &session_id)?;
-            return Ok(Some(session_id));
-        } else {
-            warn!(session_id, "Latest session directory is not a valid UUID");
-        }
-    }
-
-    Ok(None)
+    Ok(latest.map(|(_, id)| id))
 }
 
 #[cfg(test)]
@@ -590,115 +320,6 @@ mod tests {
     }
 
     #[test]
-    fn test_session_storage_roundtrip() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let temp_dir = TempDir::new().unwrap();
-        // SAFETY: Protected by mutex, only one test modifies env at a time
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
-        }
-
-        let repo = "test-repo-roundtrip";
-        let branch = "test-branch";
-        let session_id = "550e8400-e29b-41d4-a716-446655440000";
-
-        // Initially no session
-        let result = get_session(repo, branch).unwrap();
-        assert!(result.is_none());
-
-        // Store session
-        store_session(repo, branch, session_id).unwrap();
-
-        // Retrieve session
-        let result = get_session(repo, branch).unwrap();
-        assert_eq!(result, Some(session_id.to_string()));
-
-        // List sessions
-        let sessions = list_sessions(repo).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].branch, branch);
-        assert_eq!(sessions[0].session_id, Some(session_id.to_string()));
-
-        // Remove session
-        remove_session(repo, branch).unwrap();
-
-        // Should be gone
-        let result = get_session(repo, branch).unwrap();
-        assert!(result.is_none());
-
-        // Clean up env var
-        // SAFETY: Protected by mutex
-        unsafe {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
-    }
-
-    #[test]
-    fn test_list_sessions_multiple_branches() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let temp_dir = TempDir::new().unwrap();
-        // SAFETY: Protected by mutex, only one test modifies env at a time
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
-        }
-
-        let repo = "multi-branch-repo";
-
-        store_session(repo, "branch-a", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
-        store_session(repo, "branch-b", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
-        store_session(repo, "branch-c", "cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap();
-
-        let sessions = list_sessions(repo).unwrap();
-        assert_eq!(sessions.len(), 3);
-
-        // Should be sorted alphabetically
-        assert_eq!(sessions[0].branch, "branch-a");
-        assert_eq!(sessions[1].branch, "branch-b");
-        assert_eq!(sessions[2].branch, "branch-c");
-
-        // SAFETY: Protected by mutex
-        unsafe {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
-    }
-
-    #[test]
-    fn test_list_sessions_nonexistent_repo() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let temp_dir = TempDir::new().unwrap();
-        // SAFETY: Protected by mutex, only one test modifies env at a time
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
-        }
-
-        let sessions = list_sessions("nonexistent-repo").unwrap();
-        assert!(sessions.is_empty());
-
-        // SAFETY: Protected by mutex
-        unsafe {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
-    }
-
-    #[test]
-    fn test_remove_nonexistent_session() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let temp_dir = TempDir::new().unwrap();
-        // SAFETY: Protected by mutex, only one test modifies env at a time
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
-        }
-
-        // Should not error
-        remove_session("nonexistent-repo", "nonexistent-branch").unwrap();
-
-        // SAFETY: Protected by mutex
-        unsafe {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
-    }
-
-    #[test]
     fn test_list_all_repos() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
@@ -716,18 +337,10 @@ mod tests {
         store_repo_path("repo-a", &repo_a_path).unwrap();
         store_repo_path("repo-b", &repo_b_path).unwrap();
 
-        // Also store a session to make sure repo_path file doesn't interfere with list_sessions
-        store_session("repo-a", "branch-1", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
-
         let repos = list_all_repos().unwrap();
         assert_eq!(repos.len(), 2);
         assert_eq!(repos[0].0, "repo-a");
         assert_eq!(repos[1].0, "repo-b");
-
-        // Verify list_sessions still works (repo_path file is not a dir, so it's skipped)
-        let sessions = list_sessions("repo-a").unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].branch, "branch-1");
 
         // SAFETY: Protected by mutex
         unsafe {
@@ -760,33 +373,71 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_session_cleans_repo_path() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+    fn test_find_latest_project_session_picks_newest_jsonl() {
         let temp_dir = TempDir::new().unwrap();
-        // SAFETY: Protected by mutex
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", temp_dir.path());
-        }
+        let project_dir = temp_dir.path().join("-test-path");
+        fs::create_dir_all(&project_dir).unwrap();
 
-        let repo = "cleanup-repo";
-        let repo_path = temp_dir.path().to_path_buf();
+        let old_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let new_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
-        store_repo_path(repo, &repo_path).unwrap();
-        store_session(repo, "only-branch", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let old_file = project_dir.join(format!("{}.jsonl", old_id));
+        let new_file = project_dir.join(format!("{}.jsonl", new_id));
 
-        // repo_path file should exist
-        let repo_path_file = get_sessions_dir().unwrap().join(repo).join("repo_path");
-        assert!(repo_path_file.exists());
+        fs::write(&old_file, "old session").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(&new_file, "new session").unwrap();
 
-        // Remove the only branch session
-        remove_session(repo, "only-branch").unwrap();
+        let result =
+            find_latest_project_session_in(temp_dir.path(), Path::new("/test/path")).unwrap();
+        assert_eq!(result, Some(new_id.to_string()));
+    }
 
-        // repo_path file should be cleaned up since no branch dirs remain
-        assert!(!repo_path_file.exists());
+    #[test]
+    fn test_find_latest_project_session_nonexistent_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let result =
+            find_latest_project_session_in(temp_dir.path(), Path::new("/no/such/worktree"))
+                .unwrap();
+        assert!(result.is_none());
+    }
 
-        // SAFETY: Protected by mutex
-        unsafe {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
+    #[test]
+    fn test_find_latest_project_session_no_jsonl_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path().join("-test-path");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("some_other_file.txt"), "not jsonl").unwrap();
+
+        let result =
+            find_latest_project_session_in(temp_dir.path(), Path::new("/test/path")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_latest_project_session_invalid_uuid_skipped() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path().join("-test-path");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        fs::write(project_dir.join("not-a-uuid.jsonl"), "data").unwrap();
+
+        let result =
+            find_latest_project_session_in(temp_dir.path(), Path::new("/test/path")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_encode_path_for_claude_projects() {
+        assert_eq!(
+            encode_path_for_claude_projects(Path::new("/Users/anw/code/workmux")),
+            "-Users-anw-code-workmux"
+        );
+        assert_eq!(
+            encode_path_for_claude_projects(Path::new(
+                "/Users/anw/code/oss/workmux__worktrees/feature"
+            )),
+            "-Users-anw-code-oss-workmux--worktrees-feature"
+        );
     }
 }

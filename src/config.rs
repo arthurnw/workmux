@@ -116,16 +116,6 @@ pub struct ClaudeConfig {
     /// Default: true
     #[serde(default = "default_true")]
     pub auto_trust: bool,
-
-    /// Capture Claude session IDs for later restoration
-    /// Default: true
-    #[serde(default = "default_true")]
-    pub capture_sessions: bool,
-
-    /// Timeout in seconds for session capture
-    /// Default: 30
-    #[serde(default = "default_capture_timeout")]
-    pub capture_timeout: u32,
 }
 
 /// Configuration for direnv integration
@@ -139,11 +129,7 @@ pub struct DirenvConfig {
 
 impl Default for ClaudeConfig {
     fn default() -> Self {
-        Self {
-            auto_trust: true,
-            capture_sessions: true,
-            capture_timeout: 30,
-        }
+        Self { auto_trust: true }
     }
 }
 
@@ -155,10 +141,6 @@ impl Default for DirenvConfig {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_capture_timeout() -> u32 {
-    30
 }
 
 /// Configuration for a single window within a session (session mode only)
@@ -1411,16 +1393,6 @@ impl Config {
             } else {
                 self.claude.auto_trust
             },
-            capture_sessions: if project.claude.capture_sessions != default_true() {
-                project.claude.capture_sessions
-            } else {
-                self.claude.capture_sessions
-            },
-            capture_timeout: if project.claude.capture_timeout != default_capture_timeout() {
-                project.claude.capture_timeout
-            } else {
-                self.claude.capture_timeout
-            },
         };
 
         // Direnv config: per-field override
@@ -1804,8 +1776,6 @@ impl Config {
 # Default: true
 # claude:
 #   auto_trust: true
-#   capture_sessions: true
-#   capture_timeout: 30
 
 #-------------------------------------------------------------------------------
 # direnv Integration
@@ -2088,8 +2058,6 @@ mod tests {
     fn claude_config_default_matches_serde_defaults() {
         let config = ClaudeConfig::default();
         assert!(config.auto_trust);
-        assert!(config.capture_sessions);
-        assert_eq!(config.capture_timeout, 30);
     }
 
     #[test]

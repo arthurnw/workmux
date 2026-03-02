@@ -91,19 +91,6 @@ pub fn remove(
         warn!(error = %e, path = %worktree_path.display(), "Failed to untrust directory from Claude");
     }
 
-    // Remove session data
-    if context.config.claude.capture_sessions {
-        let repo_name = context
-            .main_worktree_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-
-        if let Err(e) = claude::remove_session(repo_name, &branch_name) {
-            warn!(error = %e, "Failed to remove session data");
-        }
-    }
-
     // Stop any running containers for this worktree before killing the window.
     // This is necessary because tmux kill-window sends SIGHUP which doesn't allow
     // the supervisor's Drop handler to run. We try unconditionally since sandbox

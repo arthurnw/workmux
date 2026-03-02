@@ -38,7 +38,7 @@ fn run_single_repo(dry_run: bool) -> Result<()> {
         tracing::warn!(error = %e, "Failed to store tmux session");
     }
 
-    let (restored, skipped) = restore_repo(&context, repo_name, &config, dry_run, None, None)?;
+    let (restored, skipped) = restore_repo(&context, repo_name, dry_run, None, None)?;
 
     if dry_run {
         println!("\nDry run complete. No changes made.");
@@ -60,7 +60,6 @@ fn run_single_repo(dry_run: bool) -> Result<()> {
 fn restore_repo(
     context: &WorkflowContext,
     repo_name: &str,
-    config: &config::Config,
     dry_run: bool,
     target_session: Option<&str>,
     external_orphans: Option<&mut HashMap<PathBuf, AgentState>>,
@@ -124,11 +123,7 @@ fn restore_repo(
         }
 
         // Check for stored session ID
-        let session_id = if config.claude.capture_sessions {
-            claude::get_session(repo_name, &branch)?
-        } else {
-            None
-        };
+        let session_id = claude::find_latest_project_session(&wt_path)?;
 
         if dry_run {
             if let Some(ref id) = session_id {
@@ -163,19 +158,10 @@ fn restore_repo(
                     println!(
                         "  {}: restored with session {}",
                         handle,
-                        &id[..8.min(id.len())]
+                        &id[..8_usize.min(id.len())]
                     );
                 } else {
                     println!("  {}: opened (no saved session)", handle);
-                    if config.claude.capture_sessions
-                        && let Err(e) = claude::spawn_session_capture(
-                            repo_name,
-                            &branch,
-                            config.claude.capture_timeout,
-                        )
-                    {
-                        tracing::warn!(error = %e, "Failed to spawn session capture");
-                    }
                 }
                 restored += 1;
             }
@@ -193,9 +179,7 @@ fn run_all(dry_run: bool) -> Result<()> {
 
     if repos.is_empty() {
         println!("No registered repositories found.");
-        println!(
-            "Repositories are registered when worktrees are created with session capture enabled,"
-        );
+        println!("Repositories are registered automatically when worktrees are created,");
         println!("or when 'workmux restore' is run from inside a repository.");
         return Ok(());
     }
@@ -258,7 +242,6 @@ fn run_all(dry_run: bool) -> Result<()> {
         match restore_repo(
             &context,
             name,
-            &config,
             dry_run,
             Some(&target_session),
             Some(&mut global_orphan_map),

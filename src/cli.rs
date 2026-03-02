@@ -541,13 +541,6 @@ enum Commands {
     #[command(hide = true, name = "_complete-git-branches")]
     CompleteGitBranches,
 
-    /// Internal commands (not for direct use)
-    #[command(hide = true, name = "_internal")]
-    Internal {
-        #[command(subcommand)]
-        command: InternalCommands,
-    },
-
     /// Background update check (internal use)
     #[command(hide = true, name = "_check-update")]
     CheckUpdate,
@@ -567,38 +560,12 @@ enum SessionCommands {
         #[arg(long)]
         all: bool,
     },
-
-    /// Manually capture or set a session ID for a branch
-    Capture {
-        /// Branch name to capture session for
-        #[arg(value_parser = WorktreeHandleParser::new())]
-        branch: String,
-
-        /// Session ID to store (auto-detects if not provided)
-        session_id: Option<String>,
-    },
 }
 
 #[derive(Subcommand)]
 enum DashboardCommands {
     /// Switch to the workmux dashboard window (creates if needed)
     Jump,
-}
-
-#[derive(Subcommand)]
-enum InternalCommands {
-    /// Capture Claude session ID (background process)
-    #[command(name = "capture-session")]
-    CaptureSession {
-        #[arg(long)]
-        repo: String,
-        #[arg(long)]
-        branch: String,
-        #[arg(long)]
-        initial_count: usize,
-        #[arg(long)]
-        timeout: u32,
-    },
 }
 
 /// Check if the command should show the nerdfont setup prompt.
@@ -774,9 +741,6 @@ pub fn run() -> Result<()> {
         }
         Commands::Session { command } => match command {
             SessionCommands::List { all } => command::session::list(all),
-            SessionCommands::Capture { branch, session_id } => {
-                command::session::capture(&branch, session_id.as_deref())
-            }
         },
         Commands::Restore { dry_run, all } => command::restore::run(dry_run, all),
         Commands::Config(args) => command::config::run(args),
@@ -821,17 +785,6 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Internal { command } => match command {
-            InternalCommands::CaptureSession {
-                repo,
-                branch,
-                initial_count,
-                timeout,
-            } => {
-                claude::run_capture_loop(&repo, &branch, initial_count, timeout)?;
-                Ok(())
-            }
-        },
         Commands::CheckUpdate => command::update::run_background_check(),
     }
 }
