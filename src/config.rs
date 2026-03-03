@@ -52,8 +52,14 @@ impl StatusIcons {
 /// Configuration for LLM-based branch name generation
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct AutoNameConfig {
+    /// Custom command to use instead of `llm` for branch name generation.
+    /// The command string is split into program and arguments (e.g., "claude -p").
+    /// The composed prompt is piped via stdin at execution time.
+    /// When set, `model` is ignored.
+    pub command: Option<String>,
+
     /// Model to use with llm CLI (e.g., "gpt-4o-mini", "claude-3-5-sonnet").
-    /// If not set, uses llm's default model.
+    /// If not set, uses llm's default model. Ignored when `command` is set.
     pub model: Option<String>,
 
     /// Custom system prompt for branch name generation.
@@ -1321,10 +1327,44 @@ impl Config {
             panes,
             windows,
             status_format,
-            auto_name,
             nerdfont,
             auto_update_check,
         );
+
+        // Deep merge auto_name. Security: command is global-only to prevent
+        // a malicious .workmux.yaml from executing arbitrary commands on the host.
+        merged.auto_name = match (self.auto_name, project.auto_name) {
+            (Some(global), Some(project)) => {
+                if project.command.is_some() {
+                    tracing::warn!(
+                        "auto_name.command in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                Some(AutoNameConfig {
+                    command: global.command,
+                    model: project.model.or(global.model),
+                    system_prompt: project.system_prompt.or(global.system_prompt),
+                    background: project.background.or(global.background),
+                })
+            }
+            (Some(global), None) => Some(global),
+            (None, Some(project)) => {
+                if project.command.is_some() {
+                    tracing::warn!(
+                        "auto_name.command in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                Some(AutoNameConfig {
+                    command: None,
+                    model: project.model,
+                    system_prompt: project.system_prompt,
+                    background: project.background,
+                })
+            }
+            (None, None) => None,
+        };
 
         // windows and panes are mutually exclusive: project layout choice wins entirely
         if merged.windows.is_some() && merged.panes.is_some() {

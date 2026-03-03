@@ -3277,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "workmux"
-version = "0.1.128"
+version = "0.1.129"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -3306,6 +3306,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shlex",
  "slug",
  "tabled",
  "tempfile",

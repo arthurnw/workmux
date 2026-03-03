@@ -13,10 +13,82 @@ pub fn generate_branch_name(
     prompt: &str,
     model: Option<&str>,
     system_prompt: Option<&str>,
+    command: Option<&str>,
 ) -> Result<String> {
     let system = system_prompt.unwrap_or(DEFAULT_BRANCH_SYSTEM_PROMPT);
     let full_prompt = format!("{}\n\nUser Input:\n{}", system, prompt);
 
+    let raw = run_generator_command(command, model, &full_prompt)?;
+    let branch_name = sanitize_branch_name(raw.trim());
+
+    if branch_name.is_empty() {
+        return Err(anyhow!("LLM returned empty branch name"));
+    }
+
+    Ok(branch_name)
+}
+
+fn run_generator_command(
+    command: Option<&str>,
+    model: Option<&str>,
+    full_prompt: &str,
+) -> Result<String> {
+    match command.map(str::trim).filter(|s| !s.is_empty()) {
+        Some("llm") | None => run_llm_command(model, full_prompt),
+        Some(cmdline) => run_custom_command(cmdline, full_prompt),
+    }
+}
+
+fn run_custom_command(cmdline: &str, full_prompt: &str) -> Result<String> {
+    let parts = shlex::split(cmdline).ok_or_else(|| {
+        anyhow!(
+            "Failed to parse auto_name.command: mismatched quotes in '{}'",
+            cmdline
+        )
+    })?;
+
+    if parts.is_empty() {
+        anyhow::bail!("auto_name.command is empty");
+    }
+
+    let program = &parts[0];
+    let fixed_args = &parts[1..];
+
+    tracing::debug!("Running custom generator: {} {:?}", program, fixed_args);
+
+    let mut child = Command::new(program)
+        .args(fixed_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to execute custom command '{}'", program))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(full_prompt.as_bytes())?;
+    }
+
+    let output = child.wait_with_output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = if stderr.trim().is_empty() {
+            String::from_utf8_lossy(&output.stdout)
+        } else {
+            stderr
+        };
+        anyhow::bail!(
+            "Custom command '{}' failed (exit code {}):\n{}",
+            program,
+            output.status.code().unwrap_or(1),
+            msg.trim()
+        );
+    }
+
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn run_llm_command(model: Option<&str>, full_prompt: &str) -> Result<String> {
     let mut cmd = Command::new("llm");
     if let Some(m) = model {
         cmd.args(["-m", m]);
@@ -40,14 +112,7 @@ pub fn generate_branch_name(
         return Err(anyhow!("llm command failed: {}", stderr));
     }
 
-    let raw = String::from_utf8(output.stdout)?;
-    let branch_name = sanitize_branch_name(raw.trim());
-
-    if branch_name.is_empty() {
-        return Err(anyhow!("LLM returned empty branch name"));
-    }
-
-    Ok(branch_name)
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 pub fn generate_commit_message(
@@ -176,6 +241,20 @@ mod tests {
     }
 
     #[test]
+    fn run_generator_dispatches_to_custom_command() {
+        // When command is set, it should attempt to run the custom command
+        // (will fail because "nonexistent-test-cmd" doesn't exist, but proves dispatch)
+        let result = run_generator_command(Some("nonexistent-test-cmd"), Some("model"), "prompt");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent-test-cmd"),
+            "Error should mention the custom command: {}",
+            err
+        );
+    }
+
+    #[test]
     fn sanitize_commit_message_with_quotes() {
         assert_eq!(
             sanitize_commit_message("\"feat: add user authentication\""),
@@ -206,6 +285,41 @@ mod tests {
         assert_eq!(
             sanitize_commit_message("fix(auth): handle edge case in token refresh"),
             "fix(auth): handle edge case in token refresh"
+        );
+    }
+
+    #[test]
+    fn run_generator_routes_bare_llm_to_llm_command() {
+        // "llm" as the command string should route to run_llm_command (stdin-based path),
+        // not run_custom_command. Both will fail if llm isn't installed, but the error
+        // message differs: run_custom_command appends the prompt as an arg, while
+        // run_llm_command uses stdin and mentions "llm" in its error.
+        let result = run_generator_command(Some("llm"), Some("model"), "prompt");
+        // Either llm is installed (ok) or it fails with the llm-specific error.
+        // The key assertion: it must NOT treat "llm" as a custom command (which would
+        // call `llm prompt` with prompt as an argument, producing a different error).
+        if let Err(e) = result {
+            let err = e.to_string();
+            // run_llm_command produces "Failed to run 'llm' command" or "llm command failed"
+            assert!(err.contains("llm"), "Error should mention llm: {}", err);
+            // run_custom_command would produce "Failed to execute custom command"
+            assert!(
+                !err.contains("Failed to execute custom command"),
+                "Should not be routed to run_custom_command: {}",
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn custom_command_rejects_mismatched_quotes() {
+        let result = run_custom_command("claude --sys \"unclosed", "prompt");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("mismatched quotes"),
+            "Should report mismatched quotes: {}",
+            err
         );
     }
 }
