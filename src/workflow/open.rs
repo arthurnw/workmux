@@ -89,6 +89,7 @@ pub fn open(
             post_create_hooks_run: 0,
             base_branch: None,
             did_switch: true,
+            resolved_handle: base_handle,
         });
     }
 
