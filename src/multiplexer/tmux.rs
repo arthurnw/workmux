@@ -711,6 +711,68 @@ impl Multiplexer for TmuxBackend {
         self.split_pane_internal(target_pane_id, direction, cwd, size, percentage, command)
     }
 
+    // === Multi-Session/Workspace Support ===
+
+    fn ensure_session(&self, name: &str, cwd: &Path) -> Result<()> {
+        if self.session_exists(name)? {
+            return Ok(());
+        }
+        let cwd_str = cwd
+            .to_str()
+            .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
+        Cmd::new("tmux")
+            .args(&["new-session", "-d", "-s", name, "-c", cwd_str])
+            .run()
+            .with_context(|| format!("Failed to create tmux session '{}'", name))?;
+        Ok(())
+    }
+
+    fn window_exists_in_session(
+        &self,
+        prefix: &str,
+        name: &str,
+        session: Option<&str>,
+    ) -> Result<bool> {
+        let Some(session) = session else {
+            return self.window_exists(prefix, name);
+        };
+        let prefixed_name = util::prefixed(prefix, name);
+        let target = format!("{}:", session);
+        match self.tmux_query(&["list-windows", "-t", &target, "-F", "#{window_name}"]) {
+            Ok(output) => Ok(output.lines().any(|line| line == prefixed_name)),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn find_last_window_with_prefix_in_session(
+        &self,
+        prefix: &str,
+        session: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(session) = session else {
+            return self.find_last_window_with_prefix(prefix);
+        };
+        let target = format!("{}:", session);
+        let output = self
+            .tmux_query(&[
+                "list-windows",
+                "-t",
+                &target,
+                "-F",
+                "#{window_id} #{window_name}",
+            ])
+            .unwrap_or_default();
+        let mut last_match: Option<String> = None;
+        for line in output.lines() {
+            if let Some((id, name)) = line.split_once(' ')
+                && name.starts_with(prefix)
+            {
+                last_match = Some(id.to_string());
+            }
+        }
+        Ok(last_match)
+    }
+
     // === State Reconciliation ===
 
     fn instance_id(&self) -> String {
