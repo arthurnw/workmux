@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow};
+use regex::Regex;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 const DEFAULT_BRANCH_SYSTEM_PROMPT: &str = r#"Generate a short, valid git branch name (kebab-case) based on the user's input.
 Output ONLY the branch name."#;
@@ -18,10 +20,26 @@ pub fn generate_branch_name(
     let system = system_prompt.unwrap_or(DEFAULT_BRANCH_SYSTEM_PROMPT);
     let full_prompt = format!("{}\n\nUser Input:\n{}", system, prompt);
 
+    tracing::info!(
+        user_prompt = prompt,
+        system_prompt = system,
+        model = model.unwrap_or("default"),
+        command = command.unwrap_or("llm"),
+        "generating branch name"
+    );
+    tracing::info!(full_prompt = full_prompt, "full prompt sent to generator");
+
     let raw = run_generator_command(command, model, &full_prompt)?;
+    tracing::info!(raw_output = raw.trim(), "raw output from generator");
+
     let branch_name = sanitize_branch_name(raw.trim());
+    tracing::info!(branch_name = branch_name, "sanitized branch name");
 
     if branch_name.is_empty() {
+        tracing::error!(
+            raw_output = raw.trim(),
+            "generator returned empty branch name after sanitization"
+        );
         return Err(anyhow!("LLM returned empty branch name"));
     }
 
@@ -54,7 +72,11 @@ fn run_custom_command(cmdline: &str, full_prompt: &str) -> Result<String> {
     let program = &parts[0];
     let fixed_args = &parts[1..];
 
-    tracing::debug!("Running custom generator: {} {:?}", program, fixed_args);
+    tracing::info!(
+        program = program.as_str(),
+        args = ?fixed_args,
+        "running custom generator command"
+    );
 
     let mut child = Command::new(program)
         .args(fixed_args)
@@ -77,6 +99,12 @@ fn run_custom_command(cmdline: &str, full_prompt: &str) -> Result<String> {
         } else {
             stderr
         };
+        tracing::error!(
+            program = program.as_str(),
+            exit_code = output.status.code().unwrap_or(1),
+            stderr = msg.trim(),
+            "custom generator command failed"
+        );
         anyhow::bail!(
             "Custom command '{}' failed (exit code {}):\n{}",
             program,
@@ -94,6 +122,8 @@ fn run_llm_command(model: Option<&str>, full_prompt: &str) -> Result<String> {
         cmd.args(["-m", m]);
     }
 
+    tracing::info!(model = model.unwrap_or("default"), "running llm command");
+
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -109,6 +139,7 @@ fn run_llm_command(model: Option<&str>, full_prompt: &str) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!(stderr = %stderr, "llm command failed");
         return Err(anyhow!("llm command failed: {}", stderr));
     }
 
@@ -168,9 +199,22 @@ fn sanitize_commit_message(raw: &str) -> String {
         .to_string()
 }
 
+/// Strip ANSI escape sequences (colors, cursor control, OSC, etc.)
+fn strip_ansi(s: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // CSI sequences, OSC sequences, and simple two-byte escapes
+        Regex::new(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[^\[\]]").unwrap()
+    });
+    re.replace_all(s, "").into_owned()
+}
+
 fn sanitize_branch_name(raw: &str) -> String {
+    // Strip ANSI escape sequences (some CLIs emit colors even when piped)
+    let stripped = strip_ansi(raw);
+
     // Remove markdown code blocks if present
-    let cleaned = raw
+    let cleaned = stripped
         .trim_matches('`')
         .trim()
         .lines()
@@ -238,6 +282,39 @@ mod tests {
             sanitize_commit_message("feat: add user authentication"),
             "feat: add user authentication"
         );
+    }
+
+    #[test]
+    fn sanitize_branch_name_strips_ansi_escapes() {
+        // kiro-cli emits colored output with a bell character even when piped
+        assert_eq!(
+            sanitize_branch_name("\x1b[38;5;141m> \x1b[0minvestigate-zero-report-slow-loading\x07"),
+            "investigate-zero-report-slow-loading"
+        );
+    }
+
+    #[test]
+    fn sanitize_branch_name_plain_after_ansi_fix() {
+        // When the CLI stops emitting ANSI, stripping is a no-op
+        assert_eq!(
+            sanitize_branch_name("investigate-zero-report-slow-loading"),
+            "investigate-zero-report-slow-loading"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_sequences() {
+        assert_eq!(strip_ansi("\x1b[31mhello\x1b[0m"), "hello");
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_sequences() {
+        assert_eq!(strip_ansi("hello\x1b]0;title\x07world"), "helloworld");
+    }
+
+    #[test]
+    fn strip_ansi_passthrough_clean_input() {
+        assert_eq!(strip_ansi("no-escapes-here"), "no-escapes-here");
     }
 
     #[test]

@@ -6,10 +6,10 @@ use crate::multiplexer::MuxHandle;
 use crate::multiplexer::util::prefixed;
 use tracing::info;
 
-use super::cleanup::get_worktree_mode;
 use super::context::WorkflowContext;
 use super::setup;
 use super::types::{CreateResult, SetupOptions};
+use crate::config::MuxMode;
 
 /// Open a tmux window for an existing worktree
 pub fn open(
@@ -17,6 +17,7 @@ pub fn open(
     context: &WorkflowContext,
     options: SetupOptions,
     new_window: bool,
+    session_override: bool,
     target_session: Option<&str>,
 ) -> Result<CreateResult> {
     info!(
@@ -24,21 +25,13 @@ pub fn open(
         run_hooks = options.run_hooks,
         run_file_ops = options.run_file_ops,
         new_window = new_window,
+        session_override = session_override,
         "open:start"
     );
 
-    // Validate layout config before any other operations
+    // Validate mutual exclusion of panes/windows config (mode-independent)
     if context.config.panes.is_some() && context.config.windows.is_some() {
         anyhow::bail!("Cannot specify both 'panes' and 'windows' in configuration.");
-    }
-    if let Some(windows) = &context.config.windows {
-        if options.mode != crate::config::MuxMode::Session {
-            anyhow::bail!(
-                "'windows' configuration requires 'mode: session'. \
-                 Add 'mode: session' to your config."
-            );
-        }
-        crate::config::validate_windows_config(windows)?;
     }
     if let Some(panes) = &context.config.panes {
         crate::config::validate_panes_config(panes)?;
@@ -63,18 +56,70 @@ pub fn open(
         .to_string_lossy()
         .to_string();
 
-    // Determine the target mode from stored metadata (or default to Window)
-    let stored_mode = get_worktree_mode(&base_handle);
-    let target = MuxHandle::new(
-        context.mux.as_ref(),
-        stored_mode,
-        &context.prefix,
-        &base_handle,
-    );
+    // Resolve mode using canonical base_handle (not the CLI-provided name which may be a branch).
+    // Precedence: --session flag > stored git metadata > config default (from options.mode)
+    let stored_mode = git::get_worktree_mode_opt(&base_handle);
+    let mode = if session_override || target_session.is_some() {
+        MuxMode::Session
+    } else if let Some(m) = stored_mode {
+        m
+    } else {
+        options.mode
+    };
+
+    // Validate windows config requires session mode (after canonical mode resolution)
+    if let Some(windows) = &context.config.windows {
+        if mode != MuxMode::Session {
+            anyhow::bail!(
+                "'windows' configuration requires 'mode: session'. \
+                 Add 'mode: session' to your config."
+            );
+        }
+        crate::config::validate_windows_config(windows)?;
+    }
+
+    // If mode is resolving to session and prior mode was window, close existing window targets
+    // to prevent orphaned windows (covers both --session flag and config fallback)
+    if mode == MuxMode::Session && stored_mode != Some(MuxMode::Session) {
+        // Kill all matching window targets (base + any -N numeric duplicates only)
+        let prior_mode = stored_mode.unwrap_or(MuxMode::Window);
+        let all_names = context.mux.get_all_window_names()?;
+        let full_base = prefixed(&context.prefix, &base_handle);
+        let full_base_dash = format!("{}-", full_base);
+        for name in &all_names {
+            let is_exact = *name == full_base;
+            let is_numeric_suffix = name
+                .strip_prefix(&full_base_dash)
+                .is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+
+            if is_exact || is_numeric_suffix {
+                info!(
+                    handle = base_handle,
+                    window = name,
+                    "open:closing window before mode conversion"
+                );
+                MuxHandle::kill_full(context.mux.as_ref(), prior_mode, name)?;
+            }
+        }
+    }
+
+    // Update options with the resolved mode
+    let options = SetupOptions { mode, ..options };
+
+    let target = MuxHandle::new(context.mux.as_ref(), mode, &context.prefix, &base_handle);
     let target_exists = target.exists()?;
 
     // If target exists and we're not forcing new, switch to it
     if target_exists && !new_window {
+        // Backfill mode metadata for legacy worktrees on successful switch
+        if stored_mode != Some(mode) {
+            let mode_str = if mode == MuxMode::Session {
+                "session"
+            } else {
+                "window"
+            };
+            let _ = git::set_worktree_meta(&base_handle, "mode", mode_str);
+        }
         target.select()?;
         info!(
             handle = base_handle,
@@ -90,6 +135,7 @@ pub fn open(
             base_branch: None,
             did_switch: true,
             resolved_handle: base_handle,
+            mode,
         });
     }
 
@@ -98,6 +144,23 @@ pub fn open(
         return Err(anyhow!(
             "--new is not supported in session mode. Each worktree can only have one session."
         ));
+    }
+
+    // Persist mode metadata if it's missing or changing (backfill legacy worktrees).
+    // Placed after early-exit checks to avoid side effects on failed commands.
+    if stored_mode != Some(mode) {
+        let mode_str = if mode == MuxMode::Session {
+            "session"
+        } else {
+            "window"
+        };
+        git::set_worktree_meta(&base_handle, "mode", mode_str)
+            .context("Failed to persist worktree mode")?;
+        info!(
+            handle = base_handle,
+            mode = mode_str,
+            "open:persisted worktree mode"
+        );
     }
 
     // Determine handle: use suffix if forcing new target and one exists
@@ -135,7 +198,6 @@ pub fn open(
     let options_with_workdir = SetupOptions {
         working_dir,
         config_root,
-        mode: stored_mode,
         ..options
     };
 

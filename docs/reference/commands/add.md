@@ -18,7 +18,7 @@ workmux add <branch-name> [flags]
 
 | Flag                           | Description                                                                                                                                                                                                                                                             |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--base <branch\|commit\|tag>` | Specify a base branch, commit, or tag to branch from when creating a new branch. By default, new branches are created from the current branch you have checked out.                                                                                                     |
+| `--base <branch\|commit\|tag>` | Specify a base branch, commit, or tag to branch from when creating a new branch. Overrides `base_branch` config. Defaults to `base_branch` from config, then the currently checked out branch.                                                                          |
 | `--pr <number>`                | Checkout a GitHub pull request by its number into a new worktree. Requires the `gh` command-line tool to be installed and authenticated. The local branch name defaults to the PR's head branch name, but can be overridden (e.g., `workmux add custom-name --pr 123`). |
 | `-A, --auto-name`              | Generate branch name from prompt using LLM. See [Automatic branch name generation](#automatic-branch-name-generation).                                                                                                                                                  |
 | `--name <name>`                | Override the worktree directory and tmux window name. By default, these are derived from the branch name (slugified). Cannot be used with multi-worktree generation (`--count`, `--foreach`, or multiple `--agent`).                                                    |
@@ -86,7 +86,8 @@ workmux add my-feature -o
 ```
 
 ```bash [Pull requests & forks]
-# Checkout PR #123. The local branch will be named after the PR's branch.
+# Checkout PR #123. Same-repo PRs use the PR's branch name;
+# fork PRs are prefixed with the owner (e.g., "forkowner-main").
 workmux add --pr 123
 
 # Checkout PR #456 with a custom local branch name
@@ -155,7 +156,7 @@ workmux add feature/ai-session --session -p "Implement the new API"
 
 ## AI agent integration
 
-When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`, workmux automatically injects the prompt into panes running the configured agent command (e.g., `claude`, `codex`, `opencode`, `gemini`, or whatever you've set via the `agent` config or `--agent` flag) without requiring any `.workmux.yaml` changes:
+When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`, workmux automatically injects the prompt into panes running the configured agent command (e.g., `claude`, `codex`, `opencode`, `gemini`, `kiro-cli`, `vibe`, or whatever you've set via the `agent` config or `--agent` flag) without requiring any `.workmux.yaml` changes:
 
 - Panes with a command matching the configured agent are automatically started with the given prompt.
 - You can keep your `.workmux.yaml` pane configuration simple (e.g., `panes: [{ command: "<agent>" }]`) and let workmux handle prompt injection at runtime.
@@ -167,7 +168,7 @@ This means you can launch AI agents with task-specific prompts without modifying
 The `--auto-name` (`-A`) flag generates a branch name from your prompt using an LLM. The tool used depends on your configuration:
 
 1. `auto_name.command` is set: uses that command as-is
-2. `config.agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`): uses the agent's CLI with a fast/cheap model
+2. `config.agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`): uses the agent's CLI with a fast/cheap model
 3. Neither: falls back to the [`llm`](https://llm.datasette.io/) CLI tool
 
 ### Usage

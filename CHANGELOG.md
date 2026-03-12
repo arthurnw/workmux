@@ -17,6 +17,55 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.136 (2026-03-11)
+
+- Add `base_branch` config option to set a default base branch for new
+  worktrees, so they always branch off a specific branch (e.g. main) instead of
+  whatever is currently checked out. The `--base` CLI flag takes precedence over
+  config ([#78](https://github.com/raine/workmux/issues/78))
+
+## v0.1.135 (2026-03-11)
+
+- Fix auto-generated branch names containing garbage characters with kiro-cli
+
+## v0.1.134 (2026-03-09)
+
+- Apple Container sandboxes now default to 16 GB memory limit, preventing OOM
+  kills during heavy workloads. Memory and CPU limits are configurable via
+  `container.memory` and `container.cpus` in your config
+  ([#77](https://github.com/raine/workmux/issues/77))
+- Fork PRs checked out with `--pr` now automatically prefix the local branch
+  name with the fork owner (e.g., `forkowner-main`), preventing conflicts when
+  the fork's branch name matches an existing local branch
+
+## v0.1.133 (2026-03-09)
+
+- Fixed OpenCode plugin's waiting (💬) status not triggering when the agent
+  requests permission or asks a multiple-choice question, caused by event name
+  changes in OpenCode v2 ([#75](https://github.com/raine/workmux/pull/75))
+- Added logging for branch name auto-generation
+
+## v0.1.132 (2026-03-06)
+
+- Added support for Kiro CLI (`kiro-cli`) as a recognized agent
+- Added support for Mistral Vibe (`vibe`) as a recognized agent
+  ([#76](https://github.com/raine/workmux/issues/76))
+
+## v0.1.131 (2026-03-05)
+
+- New `--session` flag for `workmux open` lets you open worktrees in a dedicated
+  tmux session instead of a window. Session mode is persisted, so reopening the
+  same worktree remembers the preference
+  ([#73](https://github.com/raine/workmux/pull/73))
+- Dashboard now has a scope filter (toggle with `F`) to show only agents in the
+  current session or all agents across sessions
+  ([#74](https://github.com/raine/workmux/issues/74))
+- `workmux setup` now offers to install bundled skills (merge, rebase, worktree,
+  coordinator) during the first-run wizard
+- Agents can now communicate across projects using the coordinator skill
+- Fixed session mode not being detected correctly when reopening a worktree
+  after a tmux restart
+
 ## v0.1.130 (2026-03-04)
 
 - Window names are now automatically suffixed with the project directory name

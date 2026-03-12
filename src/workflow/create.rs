@@ -163,7 +163,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
             mode: options.mode,
         };
 
-        return super::open::open(branch_name, context, open_options, false, None);
+        return super::open::open(branch_name, context, open_options, false, false, None);
     }
 
     // Check target using handle (the display name)
@@ -392,21 +392,23 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         }
     }
 
-    // Store the tmux mode in git config for cleanup operations
-    // This allows remove/close/merge to know whether to kill a window or session
-    if options.mode == MuxMode::Session {
-        git::set_worktree_meta(&current_handle, "mode", "session").with_context(|| {
-            format!(
-                "Failed to store tmux mode for worktree '{}'",
-                current_handle
-            )
-        })?;
-        debug!(
-            handle = %current_handle,
-            mode = "session",
-            "create:stored tmux mode in git config"
-        );
-    }
+    // Store the tmux mode in git config for cleanup and reopen operations.
+    // This allows remove/close/merge/open to know whether to kill a window or session.
+    let mode_str = match options.mode {
+        MuxMode::Session => "session",
+        MuxMode::Window => "window",
+    };
+    git::set_worktree_meta(&current_handle, "mode", mode_str).with_context(|| {
+        format!(
+            "Failed to store tmux mode for worktree '{}'",
+            current_handle
+        )
+    })?;
+    debug!(
+        handle = %current_handle,
+        mode = mode_str,
+        "create:stored tmux mode in git config"
+    );
 
     // Store the comparison base in git config (used for stats and merge target)
     git::set_branch_base(branch_name, &comparison_base).with_context(|| {

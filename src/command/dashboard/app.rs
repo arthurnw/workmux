@@ -21,6 +21,7 @@ const PR_FETCH_INTERVAL: Duration = Duration::from_secs(30);
 
 use super::agent;
 use super::diff::DiffView;
+use super::scope::ScopeMode;
 use super::settings::{
     load_hide_stale, load_last_pane_id, load_preview_size, save_hide_stale, save_last_pane_id,
     save_preview_size,
@@ -101,10 +102,14 @@ pub struct App {
     last_pane_id: Option<String>,
     /// Color palette based on the configured theme
     pub palette: ThemePalette,
+    /// Dashboard scope filter mode (All or Session)
+    pub scope_mode: ScopeMode,
+    /// Session name at launch time (for session scope filtering)
+    launch_session: Option<String>,
 }
 
 impl App {
-    pub fn new(mux: Arc<dyn Multiplexer>) -> Result<Self> {
+    pub fn new(mux: Arc<dyn Multiplexer>, cli_session_filter: bool) -> Result<Self> {
         let config = Config::load(None)?;
         let (git_tx, git_rx) = mpsc::channel();
         let (pr_tx, pr_rx) = mpsc::channel();
@@ -124,6 +129,12 @@ impl App {
 
         let palette = ThemePalette::from_theme(config.theme);
         let sort_mode = SortMode::load();
+        let scope_mode = if cli_session_filter {
+            ScopeMode::Session
+        } else {
+            ScopeMode::load()
+        };
+        let launch_session = mux.current_session();
         let git_statuses = git::load_status_cache();
         let pr_statuses = crate::github::load_pr_cache();
         let hide_stale = load_hide_stale();
@@ -166,6 +177,8 @@ impl App {
             preview_size,
             last_pane_id,
             palette,
+            scope_mode,
+            launch_session,
         };
 
         app.refresh();
@@ -187,6 +200,13 @@ impl App {
         self.agents = StateStore::new()
             .and_then(|store| store.load_reconciled_agents(self.mux.as_ref()))
             .unwrap_or_default();
+
+        // Apply session scope filter before sorting and background fetches
+        if self.scope_mode == ScopeMode::Session
+            && let Some(ref session) = self.launch_session
+        {
+            self.agents.retain(|a| a.session == *session);
+        }
 
         self.sort_agents();
 
@@ -495,6 +515,13 @@ impl App {
         self.sort_mode = self.sort_mode.next();
         self.sort_mode.save();
         self.sort_agents();
+    }
+
+    /// Toggle between showing all agents or only the current session's agents
+    pub fn toggle_scope_mode(&mut self) {
+        self.scope_mode = self.scope_mode.toggle();
+        self.scope_mode.save();
+        self.refresh();
     }
 
     /// Toggle hiding stale agents

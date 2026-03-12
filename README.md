@@ -260,6 +260,7 @@ customize.
 | Option           | Description                                          | Default                 |
 | ---------------- | ---------------------------------------------------- | ----------------------- |
 | `main_branch`    | Branch to merge into                                 | Auto-detected           |
+| `base_branch`    | Default base branch for new worktrees                | Current branch          |
 | `worktree_dir`   | Directory for worktrees (absolute or relative)       | `<project>__worktrees/` |
 | `window_prefix`  | Prefix for tmux window/session names                 | `wm-`                   |
 | `mode`           | Tmux mode (`window` or `session`)                    | `window`                |
@@ -310,7 +311,7 @@ Each pane supports:
 - `<agent>`: resolves to the configured agent (from `agent` config or `--agent`
   flag)
 
-Built-in agents (`claude`, `gemini`, `codex`, `opencode`) are auto-detected when
+Built-in agents (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`) are auto-detected when
 used as literal commands and receive prompt injection automatically, without
 needing the `<agent>` placeholder or a matching `agent` config:
 
@@ -543,8 +544,8 @@ immediately. If the branch doesn't exist, it will be created automatically.
 #### Options
 
 - `--base <branch|commit|tag>`: Specify a base branch, commit, or tag to branch
-  from when creating a new branch. By default, new branches are created from the
-  current branch you have checked out.
+  from when creating a new branch. Overrides `base_branch` config. Defaults to
+  `base_branch` from config, then the currently checked out branch.
 - `--pr <number>`: Checkout a GitHub pull request by its number into a new
   worktree.
   - Requires the `gh` command-line tool to be installed and authenticated.
@@ -710,7 +711,7 @@ done
 
 When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`,
 workmux automatically injects the prompt into panes running the configured agent
-command (e.g., `claude`, `codex`, `opencode`, `gemini`, or whatever you've set
+command (e.g., `claude`, `codex`, `opencode`, `gemini`, `kiro-cli`, or whatever you've set
 via the `agent` config or `--agent` flag) without requiring any `.workmux.yaml`
 changes:
 
@@ -729,7 +730,7 @@ The `--auto-name` (`-A`) flag generates a branch name from your prompt using an
 LLM. The tool used depends on your configuration:
 
 1. `auto_name.command` is set: uses that command as-is
-2. `config.agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`):
+2. `config.agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`):
    uses the agent's CLI with a fast/cheap model
 3. Neither: falls back to the [`llm`](https://llm.datasette.io/) CLI tool
 
@@ -1274,6 +1275,9 @@ configured pane layout and environment.
 - `-n, --new`: Force opening in a new window even if one already exists. Creates
   a duplicate window with a suffix (e.g., `-2`, `-3`). Useful for having
   multiple terminal views into the same worktree.
+- `-s, --session`: Open in session mode, overriding the stored mode. Persists
+  the mode change for subsequent opens. Cannot be combined with `--new`. Only
+  supported with tmux.
 - `--run-hooks`: Re-runs the `post_create` commands (these block window
   creation).
 - `--force-files`: Re-applies file copy/symlink operations. Useful for restoring
@@ -1302,6 +1306,9 @@ workmux open user-auth --new
 
 # Open a new window for the current worktree (run from within the worktree)
 workmux open --new
+
+# Open in session mode (converts from window mode if needed)
+workmux open user-auth --session
 
 # Open with a prompt for AI agents
 workmux open user-auth -p "Continue implementing the login flow"
@@ -1376,6 +1383,9 @@ Useful for monitoring multiple parallel agents and quickly jumping between them.
   the agent list.
 - `-P, --preview-size <10-90>`: Set preview pane size as percentage (larger =
   more preview, less table). Default: 60.
+- `-s, --session`: Filter to only show agents in the current session.
+  Useful for session-per-project workflows where each session maps to a
+  different repository.
 
 <!-- prettier-ignore -->
 > [!IMPORTANT]
@@ -1393,6 +1403,7 @@ Useful for monitoring multiple parallel agents and quickly jumping between them.
 | `d`       | View diff (opens WIP view)              |
 | `p`       | Peek at agent (dashboard stays open)    |
 | `s`       | Cycle sort mode                         |
+| `F`       | Toggle session filter                    |
 | `f`       | Toggle stale filter (show/hide stale)   |
 | `i`       | Enter input mode (type to agent)        |
 | `Ctrl+u`  | Scroll preview up                       |
@@ -1430,6 +1441,13 @@ Press `s` to cycle through sort modes:
 - **Natural**: Original tmux order (by pane creation)
 
 Your sort preference persists in the tmux session.
+
+#### Session filter
+
+Press `F` to toggle the session filter. When active, only agents in the current
+session are shown. This is useful for session-per-project workflows where each
+session maps to a repository. You can also start the dashboard with `--session`
+to default to session filtering. The preference persists across sessions.
 
 #### Stale filter
 
@@ -1721,24 +1739,33 @@ at-a-glance visibility into what the agent in each window doing.
 - 💬 = agent is waiting for user input
 - ✅ = agent finished (auto-clears on window focus)
 
-**Note**: Currently Claude Code, [OpenCode](https://opencode.ai/), and
-[Copilot CLI](https://github.com/github/copilot-cli) support hooks that enable
-this functionality. Gemini's support is
-[on the way](https://github.com/google-gemini/gemini-cli/issues/9070). Codex
-support can be tracked in
-[this issue](https://github.com/openai/codex/issues/2109).
+| Agent       | Status                                                                 |
+| ----------- | ---------------------------------------------------------------------- |
+| Claude Code | ✅ Supported                                                           |
+| Copilot CLI | ✅ Supported\*                                                         |
+| OpenCode    | ✅ Supported                                                           |
+| Gemini CLI  | [In progress](https://github.com/google-gemini/gemini-cli/issues/9070) |
+| Kiro        | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)       |
+| Codex       | [Tracking issue](https://github.com/openai/codex/issues/2109)          |
+
+**Notes:**
+
+- **Copilot CLI**: No 💬 waiting state
+- **Kiro**: Hooks support is messy: requires a custom agent since the default can't be edited
 
 ### Setup
 
-Run `workmux setup` to automatically detect your agent CLIs and install status
-tracking hooks:
+Run `workmux setup` to automatically detect your agent CLIs, install status
+tracking hooks, and install skills:
 
 ```bash
 workmux setup
 ```
 
+You can also run specific parts: `workmux setup --hooks` or `workmux setup --skills`.
+
 Workmux will also prompt you on first run if it detects an agent without status
-tracking configured.
+tracking or skills configured.
 
 Workmux automatically modifies your tmux `window-status-format` to display the
 status icons. This happens once per session and only affects the current tmux

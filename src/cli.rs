@@ -121,6 +121,85 @@ impl clap::builder::TypedValueParser for WorktreeHandleParser {
     }
 }
 
+/// Parser for agent targets, used for send/capture/status/wait/run commands.
+///
+/// Includes local worktree handles plus active agents from other projects.
+/// Cross-project agents appear as `project:handle` when their name would be ambiguous.
+#[derive(Clone, Debug)]
+struct AgentTargetParser;
+
+impl AgentTargetParser {
+    fn new() -> Self {
+        Self
+    }
+
+    fn get_targets() -> Vec<String> {
+        // Start with local worktree handles
+        let mut targets = WorktreeHandleParser::get_handles();
+
+        // Also include the main worktree handle (agents can run there too)
+        if git::is_git_repo().unwrap_or(false)
+            && let Ok(main_root) = git::get_main_worktree_root()
+            && let Some(name) = main_root.file_name()
+        {
+            let handle = name.to_string_lossy().to_string();
+            if !targets.contains(&handle) {
+                targets.push(handle);
+            }
+        }
+
+        // Append global agent handles from reconciled state
+        let mux = crate::multiplexer::create_backend(crate::multiplexer::detect_backend());
+        if let Ok(store) = crate::state::StateStore::new()
+            && let Ok(agents) = store.load_reconciled_agents(mux.as_ref())
+        {
+            for agent in &agents {
+                let root = crate::workflow::find_worktree_root(&agent.path)
+                    .unwrap_or_else(|| agent.path.clone());
+                if let Some(name) = root.file_name() {
+                    let handle = name.to_string_lossy().to_string();
+                    if !targets.contains(&handle) {
+                        targets.push(handle.clone());
+                    }
+                    // Also add qualified project:handle for disambiguation
+                    if let Some(parent) = root.parent()
+                        && let Some(proj) = parent.file_name()
+                    {
+                        let qualified = format!("{}:{}", proj.to_string_lossy(), handle);
+                        if !targets.contains(&qualified) {
+                            targets.push(qualified);
+                        }
+                    }
+                }
+            }
+        }
+
+        targets.sort();
+        targets.dedup();
+        targets
+    }
+}
+
+impl clap::builder::TypedValueParser for AgentTargetParser {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        clap::builder::StringValueParser::new().parse_ref(cmd, None, value)
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        // Dynamic completions handled by _complete-agent-targets subcommand
+        None
+    }
+}
+
 #[derive(Clone, Debug)]
 struct GitBranchParser;
 
@@ -190,8 +269,7 @@ enum Commands {
         #[arg(short = 'A', long = "auto-name", conflicts_with = "pr")]
         auto_name: bool,
 
-        /// Base branch/commit/tag to start from and compare against (for stats/merge).
-        /// Supports remote refs like origin/develop (auto-fetched). Defaults to current branch.
+        /// Base branch/commit/tag to branch from (overrides config base_branch, defaults to current branch)
         #[arg(long)]
         base: Option<String>,
 
@@ -235,8 +313,12 @@ enum Commands {
         force_files: bool,
 
         /// Force opening in a new window (creates suffix like -2, -3) instead of switching to existing
-        #[arg(long, short = 'n')]
+        #[arg(long, short = 'n', conflicts_with = "session")]
         new: bool,
+
+        /// Open in session mode (overrides stored mode for this worktree)
+        #[arg(short = 's', long)]
+        session: bool,
 
         #[command(flatten)]
         prompt: PromptArgs,
@@ -337,8 +419,8 @@ enum Commands {
 
     /// Send a prompt or instruction to a running agent
     Send {
-        /// Worktree name
-        #[arg(value_parser = WorktreeHandleParser::new())]
+        /// Worktree name (supports cross-project with project:handle syntax)
+        #[arg(value_parser = AgentTargetParser::new())]
         name: String,
 
         /// Text to send (reads from --file or stdin if omitted)
@@ -352,8 +434,8 @@ enum Commands {
 
     /// Capture terminal output from a running agent
     Capture {
-        /// Worktree name
-        #[arg(value_parser = WorktreeHandleParser::new())]
+        /// Worktree name (supports cross-project with project:handle syntax)
+        #[arg(value_parser = AgentTargetParser::new())]
         name: String,
 
         /// Number of lines to capture
@@ -363,8 +445,8 @@ enum Commands {
 
     /// Query agent status for worktrees
     Status {
-        /// Worktree names (default: all with active agents)
-        #[arg(value_parser = WorktreeHandleParser::new())]
+        /// Worktree names (supports cross-project with project:handle syntax)
+        #[arg(value_parser = AgentTargetParser::new())]
         worktrees: Vec<String>,
 
         /// Output as JSON
@@ -378,8 +460,8 @@ enum Commands {
 
     /// Wait for agents to reach a target status
     Wait {
-        /// Worktree names to wait on
-        #[arg(required = true, value_parser = WorktreeHandleParser::new())]
+        /// Worktree names (supports cross-project with project:handle syntax)
+        #[arg(required = true, value_parser = AgentTargetParser::new())]
         worktrees: Vec<String>,
 
         /// Target status to wait for
@@ -397,8 +479,8 @@ enum Commands {
 
     /// Run a command in a worktree's window
     Run {
-        /// Worktree name
-        #[arg(value_parser = WorktreeHandleParser::new())]
+        /// Worktree name (supports cross-project with project:handle syntax)
+        #[arg(value_parser = AgentTargetParser::new())]
         name: String,
 
         /// Command to run (everything after --)
@@ -421,8 +503,15 @@ enum Commands {
     /// Generate example .workmux.yaml configuration file
     Init,
 
-    /// Set up agent status tracking hooks
-    Setup,
+    /// Set up agent status tracking hooks and install skills
+    Setup {
+        /// Only set up status tracking hooks
+        #[arg(long)]
+        hooks: bool,
+        /// Only install skills
+        #[arg(long)]
+        skills: bool,
+    },
 
     /// Show detailed documentation (renders README.md)
     Docs,
@@ -442,6 +531,10 @@ enum Commands {
         /// Open diff view directly for the current worktree
         #[arg(long, short = 'd')]
         diff: bool,
+
+        /// Filter to only show agents in the current session
+        #[arg(short = 's', long)]
+        session: bool,
 
         #[command(subcommand)]
         command: Option<DashboardCommands>,
@@ -540,6 +633,12 @@ enum Commands {
     /// Output git branches for shell completion (internal use)
     #[command(hide = true, name = "_complete-git-branches")]
     CompleteGitBranches,
+
+    /// Output agent targets for shell completion (internal use)
+    ///
+    /// Includes local worktree handles plus active agents from other projects.
+    #[command(hide = true, name = "_complete-agent-targets")]
+    CompleteAgentTargets,
 
     /// Background update check (internal use)
     #[command(hide = true, name = "_check-update")]
@@ -663,8 +762,16 @@ pub fn run() -> Result<()> {
             run_hooks,
             force_files,
             new,
+            session,
             prompt,
-        } => command::open::run(name.as_deref(), run_hooks, force_files, new, prompt),
+        } => command::open::run(
+            name.as_deref(),
+            run_hooks,
+            force_files,
+            new,
+            session,
+            prompt,
+        ),
         Commands::Close { name } => command::close::run(name.as_deref()),
         Commands::Merge {
             name,
@@ -722,13 +829,14 @@ pub fn run() -> Result<()> {
         } => command::run::run(&name, command, background, keep, timeout),
         Commands::Exec { run_dir } => command::exec::run(&run_dir),
         Commands::Init => crate::config::Config::init(),
-        Commands::Setup => command::setup::run(),
+        Commands::Setup { hooks, skills } => command::setup::run(hooks, skills),
         Commands::Docs => command::docs::run(),
         Commands::Changelog => command::changelog::run(),
         Commands::Update => command::update::run(),
         Commands::Dashboard {
             preview_size,
             diff,
+            session,
             command,
         } => {
             if let Some(cmd) = command {
@@ -736,7 +844,7 @@ pub fn run() -> Result<()> {
                     DashboardCommands::Jump => command::dashboard::jump(),
                 }
             } else {
-                command::dashboard::run(preview_size, diff)
+                command::dashboard::run(preview_size, diff, session)
             }
         }
         Commands::Session { command } => match command {
@@ -782,6 +890,12 @@ pub fn run() -> Result<()> {
         Commands::CompleteGitBranches => {
             for branch in GitBranchParser::get_branches() {
                 println!("{branch}");
+            }
+            Ok(())
+        }
+        Commands::CompleteAgentTargets => {
+            for target in AgentTargetParser::get_targets() {
+                println!("{target}");
             }
             Ok(())
         }

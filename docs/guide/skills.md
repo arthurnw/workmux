@@ -29,7 +29,15 @@ dashboard:
 
 ## Installation
 
-Copy the skills you want from [`skills/`](https://github.com/raine/workmux/tree/main/skills) to your skills directory:
+Run `workmux setup` to install all skills automatically:
+
+```bash
+workmux setup --skills
+```
+
+This detects your installed agents and copies skills to the right location. The setup wizard also offers skill installation on first run.
+
+You can also copy skills manually from [`skills/`](https://github.com/raine/workmux/tree/main/skills) to your skills directory:
 
 **Claude Code**: `~/.claude/skills/` (or project `.claude/skills/`)
 
@@ -97,6 +105,23 @@ The coordinator agent does not implement tasks itself. It writes prompt files, s
 | `workmux capture`          | Read terminal output from an agent              |
 | `workmux send`             | Send instructions or skill commands to an agent |
 | `workmux run`              | Run shell commands in an agent's worktree       |
+
+### Cross-project agent communication
+
+Agent commands (`send`, `capture`, `status`, `wait`, `run`) can target agents in other projects, not just the current git repository. If a worktree name is not found locally, workmux searches all active agents globally.
+
+```bash
+# From any project, send to an agent in another project
+workmux send other-project-worktree "run the tests"
+
+# Use project:handle syntax to disambiguate when names collide
+workmux send myproject:docs-update "also add the API reference"
+
+# Check status of agents across projects
+workmux status myproject:feature-auth
+```
+
+Lifecycle commands (`add`, `open`, `merge`, `remove`, `close`) remain scoped to the current repository.
 
 ### Fan-out / fan-in pattern
 

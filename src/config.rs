@@ -168,6 +168,11 @@ pub struct Config {
     #[serde(default)]
     pub main_branch: Option<String>,
 
+    /// Default base branch/commit to branch from when creating new worktrees.
+    /// Used as fallback when --base is not passed to `workmux add`.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+
     /// Directory where worktrees should be created (optional, defaults to <project>__worktrees pattern)
     /// Can be relative to repo root or absolute path
     #[serde(default)]
@@ -455,6 +460,19 @@ impl SandboxRuntime {
         }
     }
 
+    /// Returns the default memory limit for this runtime, if one should be applied
+    /// when the user hasn't configured an explicit value.
+    ///
+    /// Apple Container defaults to 1 GB RAM per VM which is insufficient for most
+    /// workloads. Since memory is a ceiling (not an upfront allocation), a generous
+    /// default is safe. Docker/Podman use host resources directly and don't need this.
+    pub fn default_memory(&self) -> Option<&'static str> {
+        match self {
+            SandboxRuntime::AppleContainer => Some("16G"),
+            _ => None,
+        }
+    }
+
     /// Returns the serde name for this runtime (used for state store serialization).
     pub fn serde_name(&self) -> &'static str {
         match self {
@@ -674,6 +692,17 @@ pub struct ContainerConfig {
     /// Container runtime. Auto-detected from PATH if not set.
     #[serde(default)]
     pub runtime: Option<SandboxRuntime>,
+
+    /// Number of CPUs for the container. Only passed when explicitly set.
+    /// Apple Container defaults to 4 CPUs which is sufficient for most workloads.
+    #[serde(default)]
+    pub cpus: Option<u32>,
+
+    /// Memory limit for the container (e.g. "8G", "16G").
+    /// For Apple Container, defaults to "16G" when not set (the VM's 1 GB default
+    /// is too low). For Docker/Podman, only passed when explicitly set.
+    #[serde(default)]
+    pub memory: Option<String>,
 }
 
 impl ContainerConfig {
@@ -685,6 +714,8 @@ impl ContainerConfig {
     fn merge(global: Self, project: Self) -> Self {
         Self {
             runtime: project.runtime.or(global.runtime),
+            cpus: project.cpus.or(global.cpus),
+            memory: project.memory.or(global.memory),
         }
     }
 }
@@ -1113,6 +1144,9 @@ impl Config {
         let global_config = Self::load_global()?.unwrap_or_default();
         let project_config = Self::load_project()?.unwrap_or_default();
 
+        let has_explicit_agent =
+            cli_agent.is_some() || project_config.agent.is_some() || global_config.agent.is_some();
+
         let final_agent = cli_agent
             .map(|s| s.to_string())
             .or_else(|| project_config.agent.clone())
@@ -1129,10 +1163,11 @@ impl Config {
                 || repo_root.join("package-lock.json").exists()
                 || repo_root.join("yarn.lock").exists();
 
-            // Default panes based on project type (only when windows is not set)
+            // Default panes based on project type (only when windows is not set).
+            // Use agent panes if CLAUDE.md exists OR the user explicitly configured an agent.
             if config.panes.is_none() && config.windows.is_none() {
-                if repo_root.join("CLAUDE.md").exists() {
-                    config.panes = Some(Self::claude_default_panes());
+                if repo_root.join("CLAUDE.md").exists() || has_explicit_agent {
+                    config.panes = Some(Self::agent_default_panes());
                 } else {
                     config.panes = Some(Self::default_panes());
                 }
@@ -1145,7 +1180,11 @@ impl Config {
         } else {
             // Apply fallback defaults for when not in a git repo (e.g., `workmux init`).
             if config.panes.is_none() && config.windows.is_none() {
-                config.panes = Some(Self::default_panes());
+                if has_explicit_agent {
+                    config.panes = Some(Self::agent_default_panes());
+                } else {
+                    config.panes = Some(Self::default_panes());
+                }
             }
         }
 
@@ -1170,6 +1209,9 @@ impl Config {
         let (project_config, location) = Self::load_project_with_location()?;
         let project_config = project_config.unwrap_or_default();
 
+        let has_explicit_agent =
+            cli_agent.is_some() || project_config.agent.is_some() || global_config.agent.is_some();
+
         let final_agent = cli_agent
             .map(|s| s.to_string())
             .or_else(|| project_config.agent.clone())
@@ -1191,9 +1233,10 @@ impl Config {
                 || defaults_root.join("package-lock.json").exists()
                 || defaults_root.join("yarn.lock").exists();
 
+            // Use agent panes if CLAUDE.md exists OR the user explicitly configured an agent.
             if config.panes.is_none() && config.windows.is_none() {
-                if defaults_root.join("CLAUDE.md").exists() {
-                    config.panes = Some(Self::claude_default_panes());
+                if defaults_root.join("CLAUDE.md").exists() || has_explicit_agent {
+                    config.panes = Some(Self::agent_default_panes());
                 } else {
                     config.panes = Some(Self::default_panes());
                 }
@@ -1203,7 +1246,11 @@ impl Config {
                 config.pre_remove = Some(vec![NODE_MODULES_CLEANUP_SCRIPT.to_string()]);
             }
         } else if config.panes.is_none() && config.windows.is_none() {
-            config.panes = Some(Self::default_panes());
+            if has_explicit_agent {
+                config.panes = Some(Self::agent_default_panes());
+            } else {
+                config.panes = Some(Self::default_panes());
+            }
         }
 
         config.sandbox.network.validate()?;
@@ -1318,6 +1365,7 @@ impl Config {
             self,
             project,
             main_branch,
+            base_branch,
             worktree_dir,
             window_prefix,
             agent,
@@ -1582,7 +1630,7 @@ impl Config {
     }
 
     /// Get default panes for a Claude project.
-    fn claude_default_panes() -> Vec<PaneConfig> {
+    fn agent_default_panes() -> Vec<PaneConfig> {
         vec![
             PaneConfig {
                 command: Some("<agent>".to_string()),
@@ -1652,6 +1700,11 @@ impl Config {
 # The primary branch to merge into.
 # Default: Auto-detected from remote HEAD, falls back to main/master.
 # main_branch: main
+
+# Default base branch/commit to branch from when creating new worktrees.
+# The --base CLI flag always overrides this.
+# Default: The currently checked out branch.
+# base_branch: main
 
 # Default merge strategy for `workmux merge`.
 # Options: merge (default), rebase, squash
@@ -1836,6 +1889,8 @@ impl Config {
 #   # host_commands: ["just", "cargo", "npm"]
 #   # container:
 #   #   runtime: docker          # docker | podman | apple-container
+#   #   # memory: 16G            # VM memory limit (apple-container default: 16G)
+#   #   # cpus: 4                # VM CPU count (only passed when set)
 #   # lima:
 #   #   isolation: project
 #   #   cpus: 4
@@ -2118,18 +2173,23 @@ mod tests {
     fn sandbox_runtime_explicit_overrides_detect() {
         let config = ContainerConfig {
             runtime: Some(SandboxRuntime::Podman),
+            ..Default::default()
         };
         assert_eq!(config.runtime(), SandboxRuntime::Podman);
 
         let config = ContainerConfig {
             runtime: Some(SandboxRuntime::Docker),
+            ..Default::default()
         };
         assert_eq!(config.runtime(), SandboxRuntime::Docker);
     }
 
     #[test]
     fn sandbox_runtime_detect_when_unset() {
-        let config = ContainerConfig { runtime: None };
+        let config = ContainerConfig {
+            runtime: None,
+            ..Default::default()
+        };
         // Should auto-detect from PATH; result depends on environment
         // but should not panic
         let _runtime = config.runtime();
@@ -2142,6 +2202,7 @@ mod tests {
                 enabled: Some(true),
                 container: ContainerConfig {
                     runtime: Some(SandboxRuntime::Docker),
+                    ..Default::default()
                 },
                 image: Some("global-image".to_string()),
                 ..Default::default()
@@ -2153,6 +2214,7 @@ mod tests {
                 image: Some("project-image".to_string()),
                 container: ContainerConfig {
                     runtime: Some(SandboxRuntime::Podman),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -2317,6 +2379,7 @@ mod tests {
         let config = SandboxConfig {
             container: ContainerConfig {
                 runtime: Some(SandboxRuntime::Podman),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2921,9 +2984,11 @@ container:
     fn sandbox_container_config_merge() {
         let global = ContainerConfig {
             runtime: Some(SandboxRuntime::Docker),
+            ..Default::default()
         };
         let project = ContainerConfig {
             runtime: Some(SandboxRuntime::Podman),
+            ..Default::default()
         };
 
         let merged = ContainerConfig::merge(global, project);
@@ -3380,5 +3445,32 @@ sandbox:
     fn runtime_from_serde_name_unknown() {
         assert_eq!(SandboxRuntime::from_serde_name("unknown"), None);
         assert_eq!(SandboxRuntime::from_serde_name(""), None);
+    }
+
+    #[test]
+    fn runtime_default_memory() {
+        assert_eq!(SandboxRuntime::AppleContainer.default_memory(), Some("16G"));
+        assert_eq!(SandboxRuntime::Docker.default_memory(), None);
+        assert_eq!(SandboxRuntime::Podman.default_memory(), None);
+    }
+
+    #[test]
+    fn container_config_merge_resources() {
+        let global = ContainerConfig {
+            runtime: Some(SandboxRuntime::Docker),
+            memory: Some("8G".to_string()),
+            cpus: Some(4),
+            ..Default::default()
+        };
+        let project = ContainerConfig {
+            runtime: None,
+            memory: Some("16G".to_string()),
+            cpus: None,
+            ..Default::default()
+        };
+        let merged = ContainerConfig::merge(global, project);
+        assert_eq!(merged.memory.as_deref(), Some("16G")); // project overrides
+        assert_eq!(merged.cpus, Some(4)); // falls back to global
+        assert_eq!(merged.runtime, Some(SandboxRuntime::Docker));
     }
 }

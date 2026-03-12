@@ -12,13 +12,20 @@ Workmux can display the status of the agent in your tmux window list, giving you
 
 ## Agent support
 
-| Agent       | Status                                                                 |
-| ----------- | ---------------------------------------------------------------------- |
-| Claude Code | ✅ Supported                                                           |
-| Copilot CLI | ✅ Supported (no 💬 waiting state)                                     |
-| OpenCode    | ✅ Supported                                                           |
-| Gemini CLI  | [In progress](https://github.com/google-gemini/gemini-cli/issues/9070) |
-| Codex       | [Tracking issue](https://github.com/openai/codex/issues/2109)          |
+| Agent        | Status                                                                      |
+| ------------ | --------------------------------------------------------------------------- |
+| Claude Code  | ✅ Supported                                                                |
+| Copilot CLI  | ✅ Supported\*                                                              |
+| OpenCode     | ✅ Supported                                                                |
+| Gemini CLI   | [In progress](https://github.com/google-gemini/gemini-cli/issues/9070)      |
+| Kiro         | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
+| Codex        | [Tracking issue](https://github.com/openai/codex/issues/2109)               |
+| Mistral Vibe | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
+
+**Notes:**
+
+- **Copilot CLI**: No 💬 waiting state
+- **Kiro**: Hooks support is messy: requires a custom agent since the default can't be edited
 
 ## Status icons
 

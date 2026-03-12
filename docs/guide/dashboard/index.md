@@ -43,6 +43,7 @@ See [command reference](/reference/commands/dashboard) for CLI options.
 | `d`       | View diff (opens WIP view)              |
 | `p`       | Peek at agent (dashboard stays open)    |
 | `s`       | Cycle sort mode                         |
+| `F`       | Toggle session filter                   |
 | `f`       | Toggle stale filter (show/hide stale)   |
 | `i`       | Enter input mode (type to agent)        |
 | `Ctrl+u`  | Scroll preview up                       |
@@ -81,6 +82,10 @@ Press `s` to cycle through sort modes:
 - **Natural**: Original tmux order (by pane creation)
 
 Your sort preference persists in the tmux session.
+
+## Session filter
+
+Press `F` to toggle the session filter. When active, only agents in the current session are shown. This is useful for session-per-project workflows where each session maps to a repository. You can also start the dashboard with `--session` to default to session filtering. The preference persists across sessions.
 
 ## Stale filter
 
