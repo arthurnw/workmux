@@ -59,7 +59,12 @@ pub fn open(
     // Resolve mode using canonical base_handle (not the CLI-provided name which may be a branch).
     // Precedence: --session flag > stored git metadata > config default (from options.mode)
     let stored_mode = git::get_worktree_mode_opt(&base_handle);
-    let mode = if session_override || target_session.is_some() {
+    let mode = if target_session.is_some() {
+        // Restore path: add windows into the specified target session.
+        // This must use Window mode so setup_environment routes through
+        // create_window(target_session) rather than create_session().
+        MuxMode::Window
+    } else if session_override {
         MuxMode::Session
     } else if let Some(m) = stored_mode {
         m
@@ -148,7 +153,9 @@ pub fn open(
 
     // Persist mode metadata if it's missing or changing (backfill legacy worktrees).
     // Placed after early-exit checks to avoid side effects on failed commands.
-    if stored_mode != Some(mode) {
+    // Skip when target_session is set (restore path) — Window mode is forced
+    // for the tmux operation but shouldn't overwrite the worktree's stored mode.
+    if stored_mode != Some(mode) && target_session.is_none() {
         let mode_str = if mode == MuxMode::Session {
             "session"
         } else {
