@@ -780,10 +780,24 @@ impl Multiplexer for TmuxBackend {
         // We use only the socket path, which identifies the tmux server.
         // All sessions on the same server share one socket, so instance_id
         // is per-server, not per-session.
-        std::env::var("TMUX")
+        if let Some(path) = std::env::var("TMUX")
             .ok()
             .and_then(|tmux| tmux.split(',').next().map(String::from))
-            .unwrap_or_else(|| "default".to_string())
+        {
+            return path;
+        }
+
+        // Not inside tmux (e.g., `restore --all` from a non-tmux terminal).
+        // Query the running server for its socket path so state files use
+        // the same instance key that in-tmux commands produce.
+        if let Ok(output) = self.tmux_query(&["display-message", "-p", "#{socket_path}"]) {
+            let trimmed = output.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+
+        "default".to_string()
     }
 
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>> {
