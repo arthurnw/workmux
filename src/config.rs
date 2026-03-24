@@ -255,9 +255,9 @@ pub struct Config {
     #[serde(default)]
     pub nerdfont: Option<bool>,
 
-    /// Color theme for the dashboard (dark or light)
+    /// Color theme for the dashboard
     #[serde(default)]
-    pub theme: Theme,
+    pub theme: ThemeConfig,
 
     /// Mode for tmux operations: window (default) or session
     /// None means "use default" (Window), Some means explicitly set
@@ -267,6 +267,11 @@ pub struct Config {
     /// Automatically check for updates in the background. Default: true
     #[serde(default)]
     pub auto_update_check: Option<bool>,
+
+    /// Write prompt files without injecting into agent commands.
+    /// Useful when your editor has an embedded agent that reads prompt files directly.
+    #[serde(default)]
+    pub prompt_file_only: Option<bool>,
 
     /// Container sandbox configuration
     #[serde(default)]
@@ -323,13 +328,184 @@ pub enum MergeStrategy {
     Squash,
 }
 
-/// Color theme for the dashboard
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq)]
+/// Dark or light mode for the dashboard
+#[derive(Debug, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Theme {
+pub enum ThemeMode {
     #[default]
     Dark,
     Light,
+}
+
+impl<'de> serde::Deserialize<'de> for ThemeMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_lowercase().as_str() {
+            "light" => Ok(ThemeMode::Light),
+            _ => Ok(ThemeMode::Dark),
+        }
+    }
+}
+
+/// Named color scheme for the dashboard
+#[derive(Debug, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThemeScheme {
+    #[default]
+    Default,
+    Emberforge,
+    GlacierSignal,
+    ObsidianPop,
+    SlateGarden,
+    PhosphorArcade,
+    Lasergrid,
+    Mossfire,
+    NightSorbet,
+    GraphiteCode,
+    FestivalCircuit,
+    TealDrift,
+}
+
+impl ThemeScheme {
+    pub const ALL: [ThemeScheme; 12] = [
+        ThemeScheme::Default,
+        ThemeScheme::Emberforge,
+        ThemeScheme::GlacierSignal,
+        ThemeScheme::ObsidianPop,
+        ThemeScheme::SlateGarden,
+        ThemeScheme::PhosphorArcade,
+        ThemeScheme::Lasergrid,
+        ThemeScheme::Mossfire,
+        ThemeScheme::NightSorbet,
+        ThemeScheme::GraphiteCode,
+        ThemeScheme::FestivalCircuit,
+        ThemeScheme::TealDrift,
+    ];
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&s| s == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    #[allow(dead_code)]
+    pub fn name(&self) -> &'static str {
+        match self {
+            ThemeScheme::Default => "Default",
+            ThemeScheme::Emberforge => "Emberforge",
+            ThemeScheme::GlacierSignal => "Glacier Signal",
+            ThemeScheme::ObsidianPop => "Obsidian Pop",
+            ThemeScheme::SlateGarden => "Slate Garden",
+            ThemeScheme::PhosphorArcade => "Phosphor Arcade",
+            ThemeScheme::Lasergrid => "Lasergrid",
+            ThemeScheme::Mossfire => "Mossfire",
+            ThemeScheme::NightSorbet => "Night Sorbet",
+            ThemeScheme::GraphiteCode => "Graphite Code",
+            ThemeScheme::FestivalCircuit => "Festival Circuit",
+            ThemeScheme::TealDrift => "Teal Drift",
+        }
+    }
+
+    pub fn slug(&self) -> &'static str {
+        match self {
+            ThemeScheme::Default => "default",
+            ThemeScheme::Emberforge => "emberforge",
+            ThemeScheme::GlacierSignal => "glacier-signal",
+            ThemeScheme::ObsidianPop => "obsidian-pop",
+            ThemeScheme::SlateGarden => "slate-garden",
+            ThemeScheme::PhosphorArcade => "phosphor-arcade",
+            ThemeScheme::Lasergrid => "lasergrid",
+            ThemeScheme::Mossfire => "mossfire",
+            ThemeScheme::NightSorbet => "night-sorbet",
+            ThemeScheme::GraphiteCode => "graphite-code",
+            ThemeScheme::FestivalCircuit => "festival-circuit",
+            ThemeScheme::TealDrift => "teal-drift",
+        }
+    }
+
+    pub fn from_slug(s: &str) -> Option<Self> {
+        Self::ALL.iter().find(|v| v.slug() == s).copied()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ThemeScheme {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Self::from_slug(&s.to_lowercase()).unwrap_or_default())
+    }
+}
+
+/// Theme configuration: scheme + optional mode override.
+/// Supports deserializing from:
+///   - `theme: emberforge` (scheme name, auto-detect mode)
+///   - `theme: dark` or `theme: light` (legacy mode override)
+///   - `theme: { scheme: emberforge, mode: dark }` (structured)
+#[derive(Debug, Serialize, Clone, Default, PartialEq, Eq)]
+pub struct ThemeConfig {
+    pub scheme: ThemeScheme,
+    /// None = auto-detect from terminal background
+    pub mode: Option<ThemeMode>,
+}
+
+impl<'de> serde::Deserialize<'de> for ThemeConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de;
+
+        struct ThemeVisitor;
+
+        impl<'de> de::Visitor<'de> for ThemeVisitor {
+            type Value = ThemeConfig;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a theme scheme name, \"dark\", \"light\", or a {scheme, mode} map")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ThemeConfig, E> {
+                let lower = v.to_lowercase();
+                match lower.as_str() {
+                    "dark" => Ok(ThemeConfig {
+                        scheme: ThemeScheme::Default,
+                        mode: Some(ThemeMode::Dark),
+                    }),
+                    "light" => Ok(ThemeConfig {
+                        scheme: ThemeScheme::Default,
+                        mode: Some(ThemeMode::Light),
+                    }),
+                    _ => Ok(ThemeConfig {
+                        scheme: ThemeScheme::from_slug(&lower).unwrap_or_default(),
+                        mode: None,
+                    }),
+                }
+            }
+
+            fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<ThemeConfig, M::Error> {
+                let mut scheme = None;
+                let mut mode = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "scheme" => {
+                            let s: String = map.next_value()?;
+                            scheme = ThemeScheme::from_slug(&s.to_lowercase());
+                        }
+                        "mode" => {
+                            let s: String = map.next_value()?;
+                            mode = Some(match s.to_lowercase().as_str() {
+                                "light" => ThemeMode::Light,
+                                _ => ThemeMode::Dark,
+                            });
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(ThemeConfig {
+                    scheme: scheme.unwrap_or_default(),
+                    mode,
+                })
+            }
+        }
+
+        d.deserialize_any(ThemeVisitor)
+    }
 }
 
 /// Mode for multiplexer operations: create windows within the current session or create new sessions
@@ -1209,6 +1385,72 @@ impl Config {
         let (project_config, location) = Self::load_project_with_location()?;
         let project_config = project_config.unwrap_or_default();
 
+        let defaults_root = location
+            .as_ref()
+            .map(|loc| loc.config_dir.clone())
+            .or_else(|| git::get_repo_root().ok())
+            .unwrap_or_default();
+
+        let config = Self::merge_and_apply_defaults(
+            global_config,
+            project_config,
+            cli_agent,
+            &defaults_root,
+        );
+
+        debug!(
+            agent = ?config.agent,
+            panes = config.panes.as_ref().map_or(0, |p| p.len()),
+            windows = config.windows.as_ref().map_or(0, |w| w.len()),
+            has_location = location.is_some(),
+            "config:loaded with location"
+        );
+        Ok((config, location))
+    }
+
+    /// Like `load_with_location`, but searches for the project config starting
+    /// from `start_dir` instead of CWD.
+    pub fn load_with_location_from(
+        start_dir: &std::path::Path,
+        cli_agent: Option<&str>,
+    ) -> anyhow::Result<(Self, Option<ConfigLocation>)> {
+        debug!(start_dir = %start_dir.display(), "config:loading with location from");
+        let global_config = Self::load_global()?.unwrap_or_default();
+
+        let location = find_project_config(start_dir)?;
+        let project_config = if let Some(ref loc) = location {
+            Self::load_from_path(&loc.config_path)?.unwrap_or_default()
+        } else {
+            Self::default()
+        };
+
+        let defaults_root = location
+            .as_ref()
+            .map(|loc| loc.config_dir.clone())
+            .unwrap_or_else(|| start_dir.to_path_buf());
+
+        let config = Self::merge_and_apply_defaults(
+            global_config,
+            project_config,
+            cli_agent,
+            &defaults_root,
+        );
+
+        debug!(
+            agent = ?config.agent,
+            has_location = location.is_some(),
+            "config:loaded with location from"
+        );
+        Ok((config, location))
+    }
+
+    /// Merge global and project configs, resolve agent, and apply defaults.
+    fn merge_and_apply_defaults(
+        global_config: Self,
+        project_config: Self,
+        cli_agent: Option<&str>,
+        defaults_root: &std::path::Path,
+    ) -> Self {
         let has_explicit_agent =
             cli_agent.is_some() || project_config.agent.is_some() || global_config.agent.is_some();
 
@@ -1221,19 +1463,11 @@ impl Config {
         let mut config = global_config.merge(project_config);
         config.agent = Some(final_agent);
 
-        // Apply defaults - scope to config directory if nested config found
-        let defaults_root = location
-            .as_ref()
-            .map(|loc| loc.config_dir.clone())
-            .or_else(|| git::get_repo_root().ok())
-            .unwrap_or_default();
-
         if !defaults_root.as_os_str().is_empty() {
             let has_node_modules = defaults_root.join("pnpm-lock.yaml").exists()
                 || defaults_root.join("package-lock.json").exists()
                 || defaults_root.join("yarn.lock").exists();
 
-            // Use agent panes if CLAUDE.md exists OR the user explicitly configured an agent.
             if config.panes.is_none() && config.windows.is_none() {
                 if defaults_root.join("CLAUDE.md").exists() || has_explicit_agent {
                     config.panes = Some(Self::agent_default_panes());
@@ -1253,16 +1487,11 @@ impl Config {
             }
         }
 
-        config.sandbox.network.validate()?;
+        // Unwrap is safe: validate only fails for invalid network config,
+        // which would have failed during deserialization already.
+        let _ = config.sandbox.network.validate();
 
-        debug!(
-            agent = ?config.agent,
-            panes = config.panes.as_ref().map_or(0, |p| p.len()),
-            windows = config.windows.as_ref().map_or(0, |w| w.len()),
-            has_location = location.is_some(),
-            "config:loaded with location"
-        );
-        Ok((config, location))
+        config
     }
 
     /// Load configuration from a specific path.
@@ -1377,6 +1606,7 @@ impl Config {
             status_format,
             nerdfont,
             auto_update_check,
+            prompt_file_only,
         );
 
         // Deep merge auto_name. Security: command is global-only to prevent
@@ -1432,11 +1662,14 @@ impl Config {
             self.worktree_naming
         };
 
-        // Special case: theme (project wins if not default)
-        merged.theme = if project.theme != Theme::default() {
-            project.theme
-        } else {
-            self.theme
+        // Special case: theme (merge field-by-field, project wins if explicitly set)
+        merged.theme = ThemeConfig {
+            scheme: if project.theme.scheme != ThemeScheme::Default {
+                project.theme.scheme
+            } else {
+                self.theme.scheme
+            },
+            mode: project.theme.mode.or(self.theme.mode),
         };
 
         // Special case: mode (project wins if explicitly set)
@@ -1681,7 +1914,19 @@ impl Config {
             ));
         }
 
-        let example_config = r#"# workmux project configuration
+        fs::write(&config_path, EXAMPLE_PROJECT_CONFIG)?;
+
+        println!("✓ Created .workmux.yaml");
+        println!("\nThis file provides project-specific overrides.");
+        println!("For global settings, edit ~/.config/workmux/config.yaml");
+
+        Ok(())
+    }
+}
+
+/// Example project configuration with all options documented.
+/// Used by `workmux init` and `workmux config show`.
+pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # For global settings, edit ~/.config/workmux/config.yaml
 # All options below are commented out - uncomment to override defaults.
 
@@ -1689,9 +1934,16 @@ impl Config {
 # Appearance
 #-------------------------------------------------------------------------------
 
-# Color theme for the dashboard.
-# Options: dark (default), light
-# theme: dark
+# Color scheme for the dashboard. Press T (shift+t) in the dashboard to cycle.
+# Options: default, emberforge, glacier-signal, obsidian-pop, slate-garden,
+#          phosphor-arcade, lasergrid, mossfire, night-sorbet, graphite-code,
+#          festival-circuit, teal-drift
+# theme: default
+#
+# Or with explicit dark/light mode (otherwise auto-detected from terminal):
+# theme:
+#   scheme: emberforge
+#   mode: dark
 
 #-------------------------------------------------------------------------------
 # Git
@@ -1907,16 +2159,6 @@ impl Config {
 #   #     guest_path: /mnt/data
 #   #     writable: true
 "#;
-
-        fs::write(&config_path, example_config)?;
-
-        println!("✓ Created .workmux.yaml");
-        println!("\nThis file provides project-specific overrides.");
-        println!("For global settings, edit ~/.config/workmux/config.yaml");
-
-        Ok(())
-    }
-}
 
 /// Resolves an executable name or path to its full absolute path.
 ///
@@ -3472,5 +3714,129 @@ sandbox:
         assert_eq!(merged.memory.as_deref(), Some("16G")); // project overrides
         assert_eq!(merged.cpus, Some(4)); // falls back to global
         assert_eq!(merged.runtime, Some(SandboxRuntime::Docker));
+    }
+
+    // ── Theme config deserialization tests ───────────────────────
+
+    use super::{ThemeConfig, ThemeMode, ThemeScheme};
+
+    #[test]
+    fn theme_scheme_slug_roundtrip() {
+        for scheme in &ThemeScheme::ALL {
+            let slug = scheme.slug();
+            assert_eq!(
+                ThemeScheme::from_slug(slug),
+                Some(*scheme),
+                "slug roundtrip failed for {:?}",
+                scheme
+            );
+        }
+    }
+
+    #[test]
+    fn theme_scheme_next_wraps() {
+        let mut current = ThemeScheme::Default;
+        for _ in 0..ThemeScheme::ALL.len() {
+            current = current.next();
+        }
+        assert_eq!(current, ThemeScheme::Default);
+    }
+
+    #[test]
+    fn theme_scheme_all_is_exhaustive() {
+        // This match will fail to compile if a variant is added but not listed
+        for scheme in &ThemeScheme::ALL {
+            match scheme {
+                ThemeScheme::Default
+                | ThemeScheme::Emberforge
+                | ThemeScheme::GlacierSignal
+                | ThemeScheme::ObsidianPop
+                | ThemeScheme::SlateGarden
+                | ThemeScheme::PhosphorArcade
+                | ThemeScheme::Lasergrid
+                | ThemeScheme::Mossfire
+                | ThemeScheme::NightSorbet
+                | ThemeScheme::GraphiteCode
+                | ThemeScheme::FestivalCircuit
+                | ThemeScheme::TealDrift => {}
+            }
+        }
+        assert_eq!(ThemeScheme::ALL.len(), 12);
+    }
+
+    #[test]
+    fn theme_config_string_scheme() {
+        let config: ThemeConfig = serde_yaml::from_str("emberforge").unwrap();
+        assert_eq!(config.scheme, ThemeScheme::Emberforge);
+        assert_eq!(config.mode, None);
+    }
+
+    #[test]
+    fn theme_config_string_legacy_dark() {
+        let config: ThemeConfig = serde_yaml::from_str("dark").unwrap();
+        assert_eq!(config.scheme, ThemeScheme::Default);
+        assert_eq!(config.mode, Some(ThemeMode::Dark));
+    }
+
+    #[test]
+    fn theme_config_string_legacy_light() {
+        let config: ThemeConfig = serde_yaml::from_str("light").unwrap();
+        assert_eq!(config.scheme, ThemeScheme::Default);
+        assert_eq!(config.mode, Some(ThemeMode::Light));
+    }
+
+    #[test]
+    fn theme_config_structured() {
+        let yaml = "scheme: glacier-signal\nmode: light";
+        let config: ThemeConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.scheme, ThemeScheme::GlacierSignal);
+        assert_eq!(config.mode, Some(ThemeMode::Light));
+    }
+
+    #[test]
+    fn theme_config_structured_scheme_only() {
+        let yaml = "scheme: night-sorbet";
+        let config: ThemeConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.scheme, ThemeScheme::NightSorbet);
+        assert_eq!(config.mode, None);
+    }
+
+    #[test]
+    fn theme_config_unknown_scheme_defaults() {
+        let config: ThemeConfig = serde_yaml::from_str("nonexistent").unwrap();
+        assert_eq!(config.scheme, ThemeScheme::Default);
+        assert_eq!(config.mode, None);
+    }
+
+    #[test]
+    fn theme_config_full_config_file() {
+        let yaml = "agent: claude\ntheme: teal-drift\nnerdfont: true";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.theme.scheme, ThemeScheme::TealDrift);
+        assert_eq!(config.theme.mode, None);
+    }
+
+    #[test]
+    fn theme_config_full_config_structured() {
+        let yaml = "agent: claude\ntheme:\n  scheme: obsidian-pop\n  mode: dark\nnerdfont: true";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.theme.scheme, ThemeScheme::ObsidianPop);
+        assert_eq!(config.theme.mode, Some(ThemeMode::Dark));
+    }
+
+    #[test]
+    fn theme_config_full_config_legacy() {
+        let yaml = "agent: claude\ntheme: light";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.theme.scheme, ThemeScheme::Default);
+        assert_eq!(config.theme.mode, Some(ThemeMode::Light));
+    }
+
+    #[test]
+    fn theme_config_missing_defaults() {
+        let yaml = "agent: claude";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.theme.scheme, ThemeScheme::Default);
+        assert_eq!(config.theme.mode, None);
     }
 }

@@ -152,7 +152,15 @@ fn restore_repo(
         };
         options.prior_agent_state = orphan_map.remove(&effective_workdir);
 
-        match workflow::open(&branch, context, options, false, false, target_session) {
+        match workflow::open(
+            &branch,
+            context,
+            options,
+            false,
+            false,
+            target_session,
+            None,
+        ) {
             Ok(_result) => {
                 if let Some(ref id) = session_id {
                     println!(

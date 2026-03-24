@@ -4,15 +4,44 @@ use ansi_to_tui::IntoText;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Cell, Paragraph, Row, Table},
 };
 use std::collections::{BTreeMap, HashSet};
 
-use super::super::app::App;
+use super::super::app::{App, DashboardTab};
 use super::super::spinner::SPINNER_FRAMES;
 use super::format::{format_git_status, format_pr_status};
+use super::worktree::{render_worktree_preview, render_worktree_table};
+
+/// Render the tab header line showing Agents | Worktrees with active tab highlighted.
+fn render_tab_header(f: &mut Frame, app: &App, area: Rect) {
+    let active_style = Style::default()
+        .fg(app.palette.header)
+        .add_modifier(Modifier::BOLD);
+    let inactive_style = Style::default().fg(app.palette.dimmed);
+    let pipe_style = Style::default().fg(app.palette.border);
+    let rule_style = Style::default().fg(app.palette.border);
+
+    let (agents_style, worktrees_style) = match app.active_tab {
+        DashboardTab::Agents => (active_style, inactive_style),
+        DashboardTab::Worktrees => (inactive_style, active_style),
+    };
+
+    let tabs = Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Agents", agents_style),
+        Span::styled(" \u{2502} ", pipe_style),
+        Span::styled("Worktrees", worktrees_style),
+    ]);
+    let rule = Line::from(Span::styled(
+        "\u{2500}".repeat(area.width as usize),
+        rule_style,
+    ));
+
+    f.render_widget(Paragraph::new(vec![tabs, rule]), area);
+}
 
 /// Render the dashboard view (table + preview + footer).
 pub fn render_dashboard(f: &mut Frame, app: &mut App) {
@@ -21,116 +50,80 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
     // Check if backend supports preview
     let supports_preview = app.mux.supports_preview();
 
-    // Layout: table (top), preview (bottom, only if supported), footer
-    let chunks = if !supports_preview {
-        // Zellij: no preview section
-        Layout::vertical([
-            Constraint::Min(5),    // Table (takes all space except footer)
-            Constraint::Length(1), // Footer
-        ])
-        .split(area)
+    // Outer layout: fixed-height tab header and footer, flexible content area.
+    // Fill(1) guarantees the content takes exactly the remaining space.
+    let outer = Layout::vertical([
+        Constraint::Length(2), // Tab header + spacer
+        Constraint::Fill(1),   // Content (table + optional preview)
+        Constraint::Length(1), // Footer
+    ])
+    .split(area);
+
+    let tab_area = outer[0];
+    let content_area = outer[1];
+    let footer_area = outer[2];
+
+    // Split content area into table + preview (or just table if no preview)
+    let (table_area, preview_area) = if !supports_preview {
+        (content_area, None)
     } else {
-        // Other multiplexers: include preview
         let table_size = 100u16.saturating_sub(app.preview_size as u16);
-        Layout::vertical([
-            Constraint::Percentage(table_size), // Table (top)
-            Constraint::Min(5),                 // Preview (bottom, at least 5 lines)
-            Constraint::Length(1),              // Footer
+        // Use Fill() proportional constraints to split space safely without overflow
+        let content_chunks = Layout::vertical([
+            Constraint::Fill(table_size),              // Table
+            Constraint::Fill(app.preview_size as u16), // Preview
         ])
-        .split(area)
+        .split(content_area);
+        (content_chunks[0], Some(content_chunks[1]))
     };
 
-    // Table
-    render_table(f, app, chunks[0]);
+    // Tab header
+    render_tab_header(f, app, tab_area);
+
+    // Table (agents or worktrees based on active tab)
+    match app.active_tab {
+        DashboardTab::Agents => render_table(f, app, table_area),
+        DashboardTab::Worktrees => render_worktree_table(f, app, table_area),
+    }
 
     // Preview (only for backends that support it)
-    let footer_index = if supports_preview {
-        render_preview(f, app, chunks[1]);
-        2 // Footer is at index 2 when preview is shown
-    } else {
-        1 // Footer is at index 1 when preview is hidden
-    };
-
-    // Footer - show different help based on mode
-    let footer_text = if app.input_mode {
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "  INPUT MODE",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" - Type to send keys to agent  "),
-            Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
-            Span::raw(" exit"),
-        ]))
-    } else {
-        let mut spans = vec![
-            Span::styled("  [i]", Style::default().fg(Color::Green)),
-            Span::raw(" input  "),
-            Span::styled("[d]", Style::default().fg(Color::Yellow)),
-            Span::raw(" diff  "),
-            Span::styled("[1-9]", Style::default().fg(Color::Yellow)),
-            Span::raw(" jump  "),
-        ];
-
-        // Only show peek command if backend supports preview
-        if supports_preview {
-            spans.extend(vec![
-                Span::styled("[p]", Style::default().fg(Color::Cyan)),
-                Span::raw(" peek  "),
-            ]);
+    if let Some(preview) = preview_area {
+        match app.active_tab {
+            DashboardTab::Agents => render_preview(f, app, preview),
+            DashboardTab::Worktrees => render_worktree_preview(f, app, preview),
         }
+    }
 
-        spans.extend(vec![
-            Span::styled("[s]", Style::default().fg(Color::Cyan)),
-            Span::raw(" sort: "),
-            Span::styled(app.sort_mode.label(), Style::default().fg(Color::Green)),
-            Span::raw("  "),
-            Span::styled("[F]", Style::default().fg(Color::Cyan)),
-            Span::raw(" scope: "),
-        ]);
-
-        let scope_color = if app.scope_mode.label() == "all" {
-            app.palette.dimmed
-        } else {
-            Color::Yellow
-        };
-        spans.push(Span::styled(
-            app.scope_mode.label(),
-            Style::default().fg(scope_color),
-        ));
-
-        spans.extend(vec![
-            Span::raw("  "),
-            Span::styled("[f]", Style::default().fg(Color::Cyan)),
-            Span::raw(" stale: "),
-        ]);
-
-        if app.hide_stale {
-            spans.push(Span::styled("hidden", Style::default().fg(Color::Yellow)));
-        } else {
-            spans.push(Span::styled(
-                "shown",
-                Style::default().fg(app.palette.dimmed),
-            ));
+    // Footer - show status message if active, otherwise mode-specific help
+    if let Some((msg, _)) = &app.status_message {
+        let p = &app.palette;
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                format!("  {msg}"),
+                Style::default().fg(p.text),
+            )])),
+            footer_area,
+        );
+    } else {
+        match app.active_tab {
+            DashboardTab::Agents => {
+                if app.filter_active {
+                    f.render_widget(render_footer_filter(app), footer_area);
+                } else if app.input_mode {
+                    f.render_widget(render_footer_input(app), footer_area);
+                } else {
+                    render_footer_normal(f, app, footer_area);
+                }
+            }
+            DashboardTab::Worktrees => {
+                if app.worktree_filter_active {
+                    f.render_widget(render_worktree_footer_filter(app), footer_area);
+                } else {
+                    render_worktree_footer_normal(f, app, footer_area);
+                }
+            }
         }
-
-        spans.extend(vec![
-            Span::raw("  "),
-            Span::styled("[c]", Style::default().fg(Color::Green)),
-            Span::raw(" commit  "),
-            Span::styled("[m]", Style::default().fg(Color::Yellow)),
-            Span::raw(" merge  "),
-            Span::styled("[Enter]", Style::default().fg(Color::Cyan)),
-            Span::raw(" go  "),
-            Span::styled("[q]", Style::default().fg(Color::Cyan)),
-            Span::raw(" quit"),
-        ]);
-
-        Paragraph::new(Line::from(spans))
-    };
-    f.render_widget(footer_text, chunks[footer_index]);
+    }
 }
 
 fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
@@ -147,25 +140,31 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     let git_header = if is_git_fetching {
         let spinner = SPINNER_FRAMES[app.spinner_frame as usize % SPINNER_FRAMES.len()];
         Line::from(vec![
-            Span::styled("Git ", Style::default().fg(Color::Cyan).bold()),
+            Span::styled("Git ", Style::default().fg(app.palette.header).bold()),
             Span::styled(spinner.to_string(), Style::default().fg(app.palette.dimmed)),
         ])
     } else {
-        Line::from(Span::styled("Git", Style::default().fg(Color::Cyan).bold()))
+        Line::from(Span::styled(
+            "Git",
+            Style::default().fg(app.palette.header).bold(),
+        ))
     };
 
     // Build PR header with spinner when fetching
     let pr_header = if app.is_pr_fetching() {
         let spinner = SPINNER_FRAMES[app.spinner_frame as usize % SPINNER_FRAMES.len()];
         Line::from(vec![
-            Span::styled("PR ", Style::default().fg(Color::Cyan).bold()),
+            Span::styled("PR ", Style::default().fg(app.palette.header).bold()),
             Span::styled(spinner.to_string(), Style::default().fg(app.palette.dimmed)),
         ])
     } else {
-        Line::from(Span::styled("PR", Style::default().fg(Color::Cyan).bold()))
+        Line::from(Span::styled(
+            "PR",
+            Style::default().fg(app.palette.header).bold(),
+        ))
     };
 
-    let header_style = Style::default().fg(Color::Cyan).bold();
+    let header_style = Style::default().fg(app.palette.header).bold();
     let mut header_cells = vec![
         Cell::from("#").style(header_style),
         Cell::from("Project").style(header_style),
@@ -363,7 +362,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 );
 
                 let mut cells = vec![
-                    Cell::from(jump_key).style(Style::default().fg(Color::Yellow)),
+                    Cell::from(jump_key).style(Style::default().fg(app.palette.keycap)),
                     Cell::from(project),
                     Cell::from(worktree_display).style(worktree_style),
                     Cell::from(git_line),
@@ -444,22 +443,22 @@ fn render_preview(f: &mut Frame, app: &mut App, area: Rect) {
         (
             format!(" INPUT: {} ", worktree_name),
             Style::default()
-                .fg(Color::Green)
+                .fg(app.palette.success)
                 .add_modifier(Modifier::BOLD),
-            Style::default().fg(Color::Green),
+            Style::default().fg(app.palette.success),
         )
     } else if let Some(agent) = selected_agent {
         let worktree_name = app.extract_worktree_name(agent).0;
         (
             format!(" Preview: {} ", worktree_name),
-            Style::default().fg(Color::Cyan),
-            Style::default().fg(app.palette.dimmed),
+            Style::default().fg(app.palette.header),
+            Style::default().fg(app.palette.border),
         )
     } else {
         (
             " Preview ".to_string(),
-            Style::default().fg(Color::Cyan),
-            Style::default().fg(app.palette.dimmed),
+            Style::default().fg(app.palette.header),
+            Style::default().fg(app.palette.border),
         )
     };
 
@@ -488,9 +487,11 @@ fn render_preview(f: &mut Frame, app: &mut App, area: Rect) {
                         (text, count)
                     }
                     Err(_) => {
-                        // Fallback to plain text if ANSI parsing fails
-                        let count = trimmed.lines().count() as u16;
-                        (Text::raw(trimmed), count)
+                        // Fallback: strip ANSI escapes to prevent raw control
+                        // sequences from corrupting the terminal display
+                        let safe = super::super::ansi::strip_ansi_escapes(trimmed);
+                        let count = safe.lines().count() as u16;
+                        (Text::raw(safe), count)
                     }
                 }
             }
@@ -509,4 +510,202 @@ fn render_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let paragraph = Paragraph::new(text).block(block).scroll((scroll_offset, 0));
 
     f.render_widget(paragraph, area);
+}
+
+// ── Footer rendering ────────────────────────────────────────────
+
+/// Filter mode footer
+fn render_footer_filter<'a>(app: &'a App) -> Paragraph<'a> {
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            "  /",
+            Style::default()
+                .fg(app.palette.keycap)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(app.filter_text.as_str()),
+        Span::styled("_", Style::default().fg(app.palette.keycap)),
+        Span::raw("  "),
+        Span::styled("Enter", Style::default().fg(app.palette.dimmed)),
+        Span::raw(" accept  "),
+        Span::styled("Esc", Style::default().fg(app.palette.dimmed)),
+        Span::raw(" clear"),
+    ]))
+}
+
+/// Input mode footer
+fn render_footer_input<'a>(app: &'a App) -> Paragraph<'a> {
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            "  INPUT MODE",
+            Style::default()
+                .fg(app.palette.success)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" \u{2014} type to send keys to agent  "),
+        Span::styled("Esc", Style::default().fg(app.palette.keycap)),
+        Span::raw(" exit"),
+    ]))
+}
+
+/// Normal mode footer with right-pinned help
+fn render_footer_normal(f: &mut Frame, app: &App, area: Rect) {
+    let p = &app.palette;
+
+    let dimmed = Style::default().fg(p.dimmed);
+    let bold_text = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+    let pipe_style = Style::default().fg(p.border);
+    let active_style = Style::default().fg(p.info);
+
+    let cmd = |k: String, l: String| -> Vec<Span<'static>> {
+        vec![
+            Span::styled(k, dimmed),
+            Span::styled(format!(" {}", l), bold_text),
+        ]
+    };
+    let toggle = |k: String, l: String, v: String, active: bool| -> Vec<Span<'static>> {
+        vec![
+            Span::styled(k, dimmed),
+            Span::styled(format!(" {} ", l), bold_text),
+            Span::styled(
+                format!("({})", v),
+                if active { active_style } else { dimmed },
+            ),
+        ]
+    };
+    let pipe = || -> Span<'static> { Span::styled(" \u{2502} ", pipe_style) };
+
+    let sort = app.sort_mode.label();
+    let scope = app.scope_mode.label();
+    let stale = if app.hide_stale { "hidden" } else { "shown" };
+    let scope_active = scope != "all";
+    let stale_active = stale == "hidden";
+
+    let mut s: Vec<Span<'static>> = vec![Span::raw("  ")];
+    s.extend(cmd("i".into(), "Input".into()));
+    s.push(pipe());
+    s.extend(cmd("d".into(), "Diff".into()));
+    s.push(pipe());
+    s.extend(cmd("o".into(), "PR".into()));
+    s.push(pipe());
+    s.extend(cmd("1-9".into(), "Jump".into()));
+    s.push(pipe());
+    s.extend(toggle("s".into(), "Sort".into(), sort.to_string(), true));
+    s.push(pipe());
+    s.extend(toggle(
+        "F".into(),
+        "Scope".into(),
+        scope.to_string(),
+        scope_active,
+    ));
+    s.push(pipe());
+    s.extend(toggle(
+        "f".into(),
+        "Stale".into(),
+        stale.to_string(),
+        stale_active,
+    ));
+    if !app.filter_text.is_empty() {
+        s.push(pipe());
+        s.extend(cmd("/".into(), app.filter_text.clone()));
+    }
+    s.push(pipe());
+    s.extend(cmd("Tab".into(), "Worktrees".into()));
+    s.push(pipe());
+    s.extend(cmd("q".into(), "Quit".into()));
+
+    // Split footer: left commands, right-pinned help
+    let right = Line::from(vec![
+        Span::styled("?", dimmed),
+        Span::styled(" Help ", bold_text),
+    ]);
+    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(7)]).split(area);
+
+    f.render_widget(Paragraph::new(Line::from(s)), cols[0]);
+    f.render_widget(Paragraph::new(right), cols[1]);
+}
+
+/// Worktree filter mode footer
+fn render_worktree_footer_filter<'a>(app: &'a App) -> Paragraph<'a> {
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            "  /",
+            Style::default()
+                .fg(app.palette.keycap)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(app.worktree_filter_text.as_str()),
+        Span::styled("_", Style::default().fg(app.palette.keycap)),
+        Span::raw("  "),
+        Span::styled("Enter", Style::default().fg(app.palette.dimmed)),
+        Span::raw(" accept  "),
+        Span::styled("Esc", Style::default().fg(app.palette.dimmed)),
+        Span::raw(" clear"),
+    ]))
+}
+
+/// Worktree normal mode footer
+fn render_worktree_footer_normal(f: &mut Frame, app: &App, area: Rect) {
+    let p = &app.palette;
+
+    let dimmed = Style::default().fg(p.dimmed);
+    let bold_text = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+    let active_style = Style::default().fg(p.accent);
+    let pipe_style = Style::default().fg(p.border);
+
+    let cmd = |k: String, l: String| -> Vec<Span<'static>> {
+        vec![
+            Span::styled(k, dimmed),
+            Span::styled(format!(" {}", l), bold_text),
+        ]
+    };
+    let toggle = |k: String, l: String, v: String, active: bool| -> Vec<Span<'static>> {
+        vec![
+            Span::styled(k, dimmed),
+            Span::styled(format!(" {} ", l), bold_text),
+            Span::styled(
+                format!("({})", v),
+                if active { active_style } else { dimmed },
+            ),
+        ]
+    };
+    let pipe = || -> Span<'static> { Span::styled(" \u{2502} ", pipe_style) };
+
+    let sort = app.worktree_sort_mode.label();
+
+    let mut s: Vec<Span<'static>> = vec![Span::raw("  ")];
+    s.extend(cmd("o".into(), "PR".into()));
+    s.push(pipe());
+    s.extend(cmd("r".into(), "Remove".into()));
+    s.push(pipe());
+    s.extend(cmd("c".into(), "Close".into()));
+    s.push(pipe());
+    s.extend(cmd("R".into(), "Sweep".into()));
+    s.push(pipe());
+    s.extend(cmd("1-9".into(), "Jump".into()));
+    s.push(pipe());
+    s.extend(toggle("s".into(), "Sort".into(), sort.to_string(), true));
+    if !app.worktree_filter_text.is_empty() {
+        s.push(pipe());
+        s.extend(cmd("/".into(), app.worktree_filter_text.clone()));
+    } else {
+        s.push(pipe());
+        s.extend(cmd("/".into(), "Filter".into()));
+    }
+    s.push(pipe());
+    s.extend(cmd("p".into(), "Project".into()));
+    s.push(pipe());
+    s.extend(cmd("Tab".into(), "Agents".into()));
+    s.push(pipe());
+    s.extend(cmd("q".into(), "Quit".into()));
+
+    // Split footer: left commands, right-pinned help
+    let right = Line::from(vec![
+        Span::styled("?", dimmed),
+        Span::styled(" Help ", bold_text),
+    ]);
+    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(7)]).split(area);
+
+    f.render_widget(Paragraph::new(Line::from(s)), cols[0]);
+    f.render_widget(Paragraph::new(right), cols[1]);
 }

@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tracing::debug;
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +57,9 @@ pub struct PrSummary {
     /// Aggregated check status (None if no checks configured)
     #[serde(default)]
     pub checks: Option<CheckState>,
+    /// PR URL for opening in browser
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Handles both CheckRun (status/conclusion) and StatusContext (state) from GitHub API
@@ -125,6 +129,8 @@ struct PrListResult {
     pub is_draft: bool,
     #[serde(rename = "headRepositoryOwner")]
     pub head_repository_owner: RepositoryOwner,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Find a PR by its head ref (e.g., "owner:branch" format).
@@ -141,7 +147,7 @@ pub fn find_pr_by_head_ref(owner: &str, branch: &str) -> Result<Option<PrSummary
             "--state",
             "all", // Include closed/merged PRs
             "--json",
-            "number,title,state,isDraft,headRepositoryOwner",
+            "number,title,state,isDraft,headRepositoryOwner,url",
             "--limit",
             "50", // Get enough results to handle common branch names
         ])
@@ -184,6 +190,7 @@ pub fn find_pr_by_head_ref(owner: &str, branch: &str) -> Result<Option<PrSummary
         state: pr.state,
         is_draft: pr.is_draft,
         checks: None,
+        url: pr.url,
     }))
 }
 
@@ -242,6 +249,7 @@ struct PrBatchItem {
     is_draft: bool,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
+    url: String,
     #[serde(rename = "statusCheckRollup", default)]
     status_check_rollup: Vec<CheckRollupItem>,
 }
@@ -255,7 +263,7 @@ pub fn list_prs() -> Result<HashMap<String, PrSummary>> {
             "--state",
             "all",
             "--json",
-            "number,title,state,isDraft,headRefName,statusCheckRollup",
+            "number,title,state,isDraft,headRefName,url,statusCheckRollup",
             "--limit",
             "200",
         ])
@@ -293,6 +301,7 @@ pub fn list_prs() -> Result<HashMap<String, PrSummary>> {
                     state: pr.state,
                     is_draft: pr.is_draft,
                     checks: aggregate_checks(&pr.status_check_rollup),
+                    url: Some(pr.url),
                 },
             )
         })
@@ -301,41 +310,325 @@ pub fn list_prs() -> Result<HashMap<String, PrSummary>> {
     Ok(pr_map)
 }
 
-/// List PRs for a specific repository
-pub fn list_prs_in_repo(repo_root: &Path) -> Result<HashMap<String, PrSummary>> {
-    let output = match Command::new("gh")
-        .current_dir(repo_root)
-        .args([
-            "pr",
-            "list",
-            "--state",
-            "all",
-            "--json",
-            "number,title,state,isDraft,headRefName,statusCheckRollup",
-            "--limit",
-            "200",
-        ])
-        .output()
-    {
-        Ok(output) => output,
-        Err(e) => {
-            tracing::warn!("Failed to run gh pr list: {}", e);
-            return Ok(HashMap::new());
-        }
-    };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!("gh pr list failed: {}", stderr);
+/// Fetch PR status for specific branches using a single GraphQL query.
+/// Falls back to per-branch REST calls if GraphQL fails.
+pub fn list_prs_for_branches(
+    repo_root: &Path,
+    branches: &[String],
+) -> Result<HashMap<String, PrSummary>> {
+    if branches.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let prs: Vec<PrBatchItem> = serde_json::from_slice(&output.stdout)?;
+    match list_prs_for_branches_graphql(repo_root, branches) {
+        Ok(map) => Ok(map),
+        Err(e) => {
+            debug!("github:graphql batch failed, falling back to per-branch REST: {e}");
+            list_prs_for_branches_rest(repo_root, branches)
+        }
+    }
+}
 
-    let map = prs
-        .into_iter()
-        .map(|pr| {
-            (
+/// Sanitize a branch name into a valid GraphQL alias (alphanumeric + underscore).
+fn branch_to_alias(index: usize, branch: &str) -> String {
+    // Use a prefix + index to guarantee uniqueness, since sanitizing could create collisions
+    let sanitized: String = branch
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("br{}_{}", index, sanitized)
+}
+
+/// Build a GraphQL query fragment for a single branch alias.
+fn build_branch_fragment(alias: &str, branch: &str) -> String {
+    // Escape any quotes in branch name for safety
+    let escaped = branch.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"    {alias}: pullRequests(headRefName: "{escaped}", first: 1, states: [OPEN, MERGED, CLOSED], orderBy: {{field: CREATED_AT, direction: DESC}}) {{
+      nodes {{
+        number title state isDraft headRefName url
+        commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{
+          nodes {{ __typename ... on CheckRun {{ name status conclusion }} ... on StatusContext {{ context state }} }}
+        }} }} }} }} }}
+      }}
+    }}"#
+    )
+}
+
+/// GraphQL response structures
+#[derive(Debug, Deserialize)]
+struct GraphqlResponse {
+    data: Option<GraphqlData>,
+    errors: Option<Vec<GraphqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlError {
+    message: String,
+}
+
+/// The `data.repository` value is a map of alias -> PullRequestConnection
+#[derive(Debug, Deserialize)]
+struct GraphqlData {
+    repository: HashMap<String, GraphqlPrConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlPrConnection {
+    nodes: Vec<GraphqlPrNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlPrNode {
+    number: u32,
+    title: String,
+    state: String,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    url: String,
+    commits: GraphqlCommits,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlCommits {
+    nodes: Vec<GraphqlCommitNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlCommitNode {
+    commit: GraphqlCommit,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlCommit {
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Option<GraphqlCheckRollup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlCheckRollup {
+    contexts: GraphqlCheckContexts,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlCheckContexts {
+    nodes: Vec<GraphqlCheckNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "__typename")]
+enum GraphqlCheckNode {
+    CheckRun {
+        status: Option<String>,
+        conclusion: Option<String>,
+    },
+    StatusContext {
+        state: Option<String>,
+    },
+}
+
+impl GraphqlCheckNode {
+    fn to_rollup_item(&self) -> CheckRollupItem {
+        match self {
+            GraphqlCheckNode::CheckRun { status, conclusion } => CheckRollupItem {
+                status: status.clone(),
+                conclusion: conclusion.clone(),
+            },
+            GraphqlCheckNode::StatusContext { state } => CheckRollupItem {
+                status: state.clone(),
+                conclusion: None,
+            },
+        }
+    }
+}
+
+/// Repository context resolved by `gh`, matching its own repo detection logic
+/// (respects `gh repo set-default`, fork conventions, GHES hosts).
+#[derive(Debug, Deserialize)]
+struct RepoContext {
+    name: String,
+    owner: RepositoryOwner,
+    url: String,
+}
+
+/// Get the repo owner, name, and API hostname using `gh repo view`.
+/// This delegates repo resolution to `gh` so it works correctly with forks,
+/// `gh repo set-default`, and GitHub Enterprise.
+fn get_repo_context(repo_root: &Path) -> Result<(String, String, String)> {
+    let output = Command::new("gh")
+        .current_dir(repo_root)
+        .args(["repo", "view", "--json", "owner,name,url"])
+        .output()
+        .context("Failed to run gh repo view")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("gh repo view failed: {stderr}"));
+    }
+
+    let ctx: RepoContext =
+        serde_json::from_slice(&output.stdout).context("Failed to parse gh repo view output")?;
+
+    // Extract hostname from the repo URL for GHES support
+    let hostname = ctx
+        .url
+        .strip_prefix("https://")
+        .or_else(|| ctx.url.strip_prefix("http://"))
+        .and_then(|s| s.split('/').next())
+        .unwrap_or("github.com")
+        .to_string();
+
+    Ok((ctx.owner.login, ctx.name, hostname))
+}
+
+/// Fetch PR status for multiple branches in a single GraphQL API call.
+fn list_prs_for_branches_graphql(
+    repo_root: &Path,
+    branches: &[String],
+) -> Result<HashMap<String, PrSummary>> {
+    let (owner, repo_name, hostname) = get_repo_context(repo_root)?;
+
+    // Build query fragments with one alias per branch
+    let fragments: Vec<String> = branches
+        .iter()
+        .enumerate()
+        .map(|(i, branch)| {
+            let alias = branch_to_alias(i, branch);
+            build_branch_fragment(&alias, branch)
+        })
+        .collect();
+
+    // Use GraphQL variables for owner/name to avoid injection from crafted repo names
+    let query = format!(
+        "query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{\n{}\n  }} }}",
+        fragments.join("\n")
+    );
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "query": query,
+        "variables": {
+            "owner": owner,
+            "name": repo_name,
+        }
+    }))
+    .context("JSON serialize")?;
+
+    let mut child = Command::new("gh")
+        .current_dir(repo_root)
+        .args(["api", "graphql", "--hostname", &hostname, "--input", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn gh api graphql")?;
+
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(&body)
+        .context("Failed to write to gh stdin")?;
+
+    let output = child
+        .wait_with_output()
+        .context("Failed to wait for gh api graphql")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("gh api graphql failed: {stderr}"));
+    }
+
+    let response: GraphqlResponse =
+        serde_json::from_slice(&output.stdout).context("Failed to parse GraphQL response")?;
+
+    if let Some(errors) = &response.errors
+        && !errors.is_empty()
+    {
+        let msgs: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        return Err(anyhow!("GraphQL errors: {}", msgs.join("; ")));
+    }
+
+    let data = response
+        .data
+        .ok_or_else(|| anyhow!("No data in GraphQL response"))?;
+    let repo = data.repository;
+
+    let mut map = HashMap::new();
+    for (_alias, connection) in repo {
+        for node in connection.nodes {
+            let checks: Vec<CheckRollupItem> = node
+                .commits
+                .nodes
+                .first()
+                .and_then(|c| c.commit.status_check_rollup.as_ref())
+                .map(|rollup| {
+                    rollup
+                        .contexts
+                        .nodes
+                        .iter()
+                        .map(|n| n.to_rollup_item())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            map.insert(
+                node.head_ref_name,
+                PrSummary {
+                    number: node.number,
+                    title: node.title,
+                    state: node.state,
+                    is_draft: node.is_draft,
+                    checks: aggregate_checks(&checks),
+                    url: Some(node.url),
+                },
+            );
+        }
+    }
+
+    Ok(map)
+}
+
+/// Fallback: fetch PR status one branch at a time using REST-style gh pr list.
+fn list_prs_for_branches_rest(
+    repo_root: &Path,
+    branches: &[String],
+) -> Result<HashMap<String, PrSummary>> {
+    let mut map = HashMap::new();
+
+    for branch in branches {
+        let output = match Command::new("gh")
+            .current_dir(repo_root)
+            .args([
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--json",
+                "number,title,state,isDraft,headRefName,url,statusCheckRollup",
+                "--limit",
+                "1",
+            ])
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => continue,
+        };
+
+        if !output.status.success() {
+            continue;
+        }
+
+        let prs: Vec<PrBatchItem> = match serde_json::from_slice(&output.stdout) {
+            Ok(prs) => prs,
+            Err(_) => continue,
+        };
+
+        if let Some(pr) = prs.into_iter().next() {
+            map.insert(
                 pr.head_ref_name,
                 PrSummary {
                     number: pr.number,
@@ -343,10 +636,11 @@ pub fn list_prs_in_repo(repo_root: &Path) -> Result<HashMap<String, PrSummary>> 
                     state: pr.state,
                     is_draft: pr.is_draft,
                     checks: aggregate_checks(&pr.status_check_rollup),
+                    url: Some(pr.url),
                 },
-            )
-        })
-        .collect();
+            );
+        }
+    }
 
     Ok(map)
 }
@@ -570,5 +864,46 @@ mod tests {
                 total: 1
             })
         );
+    }
+
+    #[test]
+    fn branch_to_alias_sanitizes_hyphens() {
+        let alias = branch_to_alias(0, "my-feature-branch");
+        assert_eq!(alias, "br0_my_feature_branch");
+    }
+
+    #[test]
+    fn branch_to_alias_sanitizes_slashes() {
+        let alias = branch_to_alias(3, "feat/add-thing");
+        assert_eq!(alias, "br3_feat_add_thing");
+    }
+
+    #[test]
+    fn branch_to_alias_index_prevents_collisions() {
+        // "a-b" and "a_b" would collide without the index prefix
+        let a1 = branch_to_alias(0, "a-b");
+        let a2 = branch_to_alias(1, "a_b");
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn graphql_check_node_to_rollup_item_check_run() {
+        let node = GraphqlCheckNode::CheckRun {
+            status: Some("COMPLETED".to_string()),
+            conclusion: Some("SUCCESS".to_string()),
+        };
+        let item = node.to_rollup_item();
+        assert_eq!(item.status.as_deref(), Some("COMPLETED"));
+        assert_eq!(item.conclusion.as_deref(), Some("SUCCESS"));
+    }
+
+    #[test]
+    fn graphql_check_node_to_rollup_item_status_context() {
+        let node = GraphqlCheckNode::StatusContext {
+            state: Some("PENDING".to_string()),
+        };
+        let item = node.to_rollup_item();
+        assert_eq!(item.status.as_deref(), Some("PENDING"));
+        assert_eq!(item.conclusion, None);
     }
 }

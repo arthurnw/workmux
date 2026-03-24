@@ -38,6 +38,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         name: "open-pr",
         content: include_str!("../skills/open-pr/SKILL.md"),
     },
+    BundledSkill {
+        name: "workmux",
+        content: include_str!("../skills/workmux/SKILL.md"),
+    },
 ];
 
 /// Return the skills base directory for a given agent.
@@ -47,6 +51,14 @@ pub fn skills_dir(agent: Agent) -> Option<PathBuf> {
     match agent {
         Agent::Claude => Some(home.join(".claude/skills")),
         Agent::OpenCode => Some(home.join(".config/opencode/skills")),
+        Agent::Pi => {
+            let pi_dir = if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
+                PathBuf::from(dir)
+            } else {
+                home.join(".pi/agent")
+            };
+            Some(pi_dir.join("skills"))
+        }
         Agent::Copilot => None,
     }
 }
@@ -200,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_bundled_skills_not_empty() {
-        assert_eq!(BUNDLED_SKILLS.len(), 5);
+        assert_eq!(BUNDLED_SKILLS.len(), 6);
         for skill in BUNDLED_SKILLS {
             assert!(!skill.name.is_empty(), "skill name should not be empty");
             assert!(
@@ -231,6 +243,14 @@ mod tests {
     }
 
     #[test]
+    fn test_skills_dir_pi() {
+        let dir = skills_dir(Agent::Pi);
+        assert!(dir.is_some());
+        let path = dir.unwrap();
+        assert!(path.ends_with(".pi/agent/skills"));
+    }
+
+    #[test]
     fn test_skills_dir_copilot_none() {
         assert!(skills_dir(Agent::Copilot).is_none());
     }
@@ -243,5 +263,6 @@ mod tests {
         assert!(names.contains(&"worktree"));
         assert!(names.contains(&"coordinator"));
         assert!(names.contains(&"open-pr"));
+        assert!(names.contains(&"workmux"));
     }
 }

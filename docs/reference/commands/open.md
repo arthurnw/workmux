@@ -4,15 +4,15 @@ description: Open or switch to a tmux window for an existing worktree
 
 # open
 
-Opens or switches to a tmux window for a pre-existing git worktree. If the window already exists, switches to it. If not, creates a new window with the configured pane layout and environment.
+Opens or switches to a tmux window for a pre-existing git worktree. If the window already exists, switches to it. If not, creates a new window with the configured pane layout and environment. Accepts multiple names to open several worktrees at once.
 
 ```bash
-workmux open [name] [flags]
+workmux open [name...] [flags]
 ```
 
 ## Arguments
 
-- `[name]`: Worktree name (the directory name, which is also the tmux window name without the prefix). Optional with `--new` when run from inside a worktree.
+- `[name...]`: One or more worktree names (the directory name, which is also the tmux window name without the prefix). Optional with `--new` when run from inside a worktree.
 
 ## Options
 
@@ -25,6 +25,7 @@ workmux open [name] [flags]
 | `-p, --prompt <text>`      | Provide an inline prompt for AI agent panes.                                                                                                                                                                                  |
 | `-P, --prompt-file <path>` | Provide a path to a file containing the prompt.                                                                                                                                                                               |
 | `-e, --prompt-editor`      | Open your editor to write the prompt interactively.                                                                                                                                                                           |
+| `--prompt-file-only`       | Write the prompt file to the worktree without injecting it into agent commands.                                                                                                                                               |
 
 ## What happens
 
@@ -58,4 +59,7 @@ workmux open user-auth --run-hooks
 
 # Open and restore configuration files
 workmux open user-auth --force-files
+
+# Open multiple worktrees at once
+workmux open user-auth api-refactor bugfix-login
 ```

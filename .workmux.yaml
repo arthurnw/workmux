@@ -18,6 +18,7 @@ files:
     - tests/venv # Share Python venv for faster worktree creation
     - .ignore
     - history
+    - hooks/pre-commit
 
 pre_merge:
   - just check-ci

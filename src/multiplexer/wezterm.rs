@@ -559,6 +559,13 @@ impl Multiplexer for WezTermBackend {
         self.select_pane(pane_id)
     }
 
+    fn kill_pane(&self, pane_id: &str) -> Result<()> {
+        self.wezterm_cmd()
+            .args(&["cli", "kill-pane", "--pane-id", pane_id])
+            .run()?;
+        Ok(())
+    }
+
     fn respawn_pane(&self, pane_id: &str, cwd: &Path, cmd: Option<&str>) -> Result<String> {
         let panes = self.list_panes()?;
         let target = panes
@@ -711,6 +718,9 @@ impl Multiplexer for WezTermBackend {
         self.wezterm_cmd()
             .args(&["cli", "send-text", "--pane-id", pane_id, content])
             .run()?;
+
+        // Small delay to let the application process the bracketed paste before sending Enter
+        thread::sleep(Duration::from_millis(100));
 
         // Send Enter to submit
         self.wezterm_cmd()

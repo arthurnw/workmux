@@ -570,6 +570,10 @@ impl Multiplexer for TmuxBackend {
         self.tmux_cmd(&["switch-client", "-t", pane_id])
     }
 
+    fn kill_pane(&self, pane_id: &str) -> Result<()> {
+        self.tmux_cmd(&["kill-pane", "-t", pane_id])
+    }
+
     fn respawn_pane(&self, pane_id: &str, cwd: &Path, cmd: Option<&str>) -> Result<String> {
         let working_dir_str = cwd
             .to_str()
@@ -650,6 +654,10 @@ impl Multiplexer for TmuxBackend {
         }
 
         self.tmux_cmd(&["paste-buffer", "-t", pane_id, "-p", "-d"])?;
+
+        // Small delay to let the application process the bracketed paste before sending Enter
+        thread::sleep(Duration::from_millis(100));
+
         self.tmux_cmd(&["send-keys", "-t", pane_id, "Enter"])
     }
 

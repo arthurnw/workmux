@@ -29,6 +29,7 @@ workmux add <branch-name> [flags]
 | `-p, --prompt <text>`          | Provide an inline prompt that will be automatically passed to AI agent panes.                                                                                                                                                                                           |
 | `-P, --prompt-file <path>`     | Provide a path to a file whose contents will be used as the prompt.                                                                                                                                                                                                     |
 | `-e, --prompt-editor`          | Open your `$EDITOR` (or `$VISUAL`) to write the prompt interactively.                                                                                                                                                                                                   |
+| `--prompt-file-only`           | Write the prompt file to `.workmux/PROMPT-<branch>.md` without injecting it into agent commands. No agent pane is required. Useful when your editor has an embedded agent that reads the prompt file directly. Can also be set in config with `prompt_file_only: true`. |
 | `-a, --agent <name>`           | The agent(s) to use for the worktree(s). Can be specified multiple times to generate a worktree for each agent. Overrides the `agent` from your config file.                                                                                                            |
 | `-l, --layout <name>`          | Use a [named pane layout](/guide/configuration#named-layouts) from config instead of the default panes.                                                                                                                                                                 |
 | `-W, --wait`                   | Block until the created tmux window is closed. Useful for scripting when you want to wait for an agent to complete its work. The agent can signal completion by running `workmux remove --keep-branch`.                                                                 |
@@ -121,6 +122,9 @@ workmux add feature/refactor --prompt-file task-description.md
 
 # Open your editor to write a prompt interactively
 workmux add feature/new-api --prompt-editor
+
+# Write prompt file only (for editors with embedded agents like neovim)
+workmux add feature/task -P task.md --prompt-file-only
 ```
 
 ```bash [Skip setup steps]
@@ -156,19 +160,21 @@ workmux add feature/ai-session --session -p "Implement the new API"
 
 ## AI agent integration
 
-When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`, workmux automatically injects the prompt into panes running the configured agent command (e.g., `claude`, `codex`, `opencode`, `gemini`, `kiro-cli`, `vibe`, or whatever you've set via the `agent` config or `--agent` flag) without requiring any `.workmux.yaml` changes:
+When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`, workmux automatically injects the prompt into panes running the configured agent command (e.g., `claude`, `codex`, `opencode`, `gemini`, `kiro-cli`, `vibe`, `pi`, or whatever you've set via the `agent` config or `--agent` flag) without requiring any `.workmux.yaml` changes:
 
 - Panes with a command matching the configured agent are automatically started with the given prompt.
 - You can keep your `.workmux.yaml` pane configuration simple (e.g., `panes: [{ command: "<agent>" }]`) and let workmux handle prompt injection at runtime.
 
 This means you can launch AI agents with task-specific prompts without modifying your project configuration for each task.
 
+If your editor has an embedded agent (e.g., neovim with an agent plugin), use `--prompt-file-only` to write the prompt to `.workmux/PROMPT-<branch>.md` without requiring an agent pane. Your editor can then detect and consume the file on startup. This can also be set permanently in config with `prompt_file_only: true`.
+
 ## Automatic branch name generation
 
 The `--auto-name` (`-A`) flag generates a branch name from your prompt using an LLM. The tool used depends on your configuration:
 
 1. `auto_name.command` is set: uses that command as-is
-2. `config.agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`): uses the agent's CLI with a fast/cheap model
+2. `config.agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`, `pi`): uses the agent's CLI with a fast/cheap model
 3. Neither: falls back to the [`llm`](https://llm.datasette.io/) CLI tool
 
 ### Usage
@@ -214,6 +220,8 @@ When an agent is configured, these commands are used automatically:
 | `gemini`   | `gemini -m gemini-2.5-flash-lite -p`                                     |
 | `codex`    | `codex exec --config model_reasoning_effort="low" -m gpt-5.1-codex-mini` |
 | `opencode` | `opencode run`                                                           |
+| `kiro-cli` | `kiro-cli chat --no-interactive`                                         |
+| `pi`       | `pi -p`                                                                  |
 
 To override back to `llm` when an agent is configured, set `auto_name.command: "llm"`.
 

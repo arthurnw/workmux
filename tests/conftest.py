@@ -1285,6 +1285,7 @@ def write_workmux_config(
     worktree_naming: Optional[str] = None,
     worktree_prefix: Optional[str] = None,
     base_branch: Optional[str] = None,
+    prompt_file_only: Optional[bool] = None,
 ):
     """Creates a .workmux.yaml file from structured data and optionally commits it."""
     # Disable nerdfonts by default to ensure consistent "wm-" prefix in tests,
@@ -1312,6 +1313,8 @@ def write_workmux_config(
         config["worktree_prefix"] = worktree_prefix
     if base_branch:
         config["base_branch"] = base_branch
+    if prompt_file_only is not None:
+        config["prompt_file_only"] = prompt_file_only
     (repo_path / ".workmux.yaml").write_text(yaml.dump(config))
 
     # If env is provided, commit the config file to avoid uncommitted changes in merge tests
@@ -1572,7 +1575,7 @@ def run_workmux_open(
     env: MuxEnvironment,
     workmux_exe_path: Path,
     repo_path: Path,
-    branch_name: Optional[str] = None,
+    branch_name: Union[Optional[str], List[str]] = None,
     *,
     run_hooks: bool = False,
     force_files: bool = False,
@@ -1590,7 +1593,8 @@ def run_workmux_open(
     Returns the command result so tests can assert on stdout/stderr.
 
     Args:
-        branch_name: Worktree name to open (optional with --new, uses current directory)
+        branch_name: Worktree name(s) to open. Can be a single string, a list of
+            strings, or None (optional with --new, uses current directory).
         new_window: If True, pass --new to force opening a new window (creates suffix like -2, -3)
         session: If True, pass -s to force opening as a tmux session
         prompt: Inline prompt text to pass via -p
@@ -1612,7 +1616,10 @@ def run_workmux_open(
         flags.append(f"-P {shlex.quote(str(prompt_file))}")
 
     flag_str = f" {' '.join(flags)}" if flags else ""
-    name_part = f" {branch_name}" if branch_name else ""
+    if isinstance(branch_name, list):
+        name_part = " " + " ".join(branch_name) if branch_name else ""
+    else:
+        name_part = f" {branch_name}" if branch_name else ""
     return run_workmux_command(
         env,
         workmux_exe_path,

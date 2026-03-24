@@ -1,6 +1,6 @@
 [package]
 name = "workmux"
-version = "0.1.136"
+version = "0.1.147"
 edition = "2024"
 authors = ["workmux contributors"]
 description = "An opinionated workflow tool that orchestrates git worktrees and tmux"
@@ -15,6 +15,7 @@ include = [
     "/.claude-plugin/**/*",
     "/.github/hooks/**/*",
     "/.opencode/plugin/**/*",
+    "/.pi/extensions/**/*",
     "/Cargo.toml",
     "/Cargo.lock",
     "/CHANGELOG.md",
@@ -60,6 +61,7 @@ nix = { version = "0.31.1", features = ["fs"] }
 tempfile = "3.14"
 getrandom = "0.4.1"
 similar = "2"
+terminal-light = "1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"

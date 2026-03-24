@@ -57,18 +57,37 @@ Most options have sensible defaults. You only need to configure what you want to
 
 ### Basic options
 
-| Option           | Description                                                                 | Default                 |
-| ---------------- | --------------------------------------------------------------------------- | ----------------------- |
-| `main_branch`    | Branch to merge into                                                        | Auto-detected           |
-| `base_branch`    | Default base branch for new worktrees (overridden by `--base`)              | Current branch          |
-| `worktree_dir`   | Directory for worktrees (absolute or relative)                              | `<project>__worktrees/` |
-| `nerdfont`       | Enable nerdfont icons (prompted on first run)                               | Prompted                |
-| `window_prefix`  | Override tmux window/session prefix                                         | Icon or `wm-`           |
-| `agent`          | Default agent for `<agent>` placeholder                                     | `claude`                |
-| `layouts`        | Named pane layouts, selectable with `-l/--layout`                           | --                      |
-| `merge_strategy` | Default merge strategy (`merge`, `rebase`, `squash`)                        | `merge`                 |
-| `theme`          | Dashboard color theme (`dark`, `light`)                                     | `dark`                  |
-| `mode`           | Tmux mode (`window` or `session`). See [session mode](/guide/session-mode). | `window`                |
+| Option             | Description                                                                 | Default                     |
+| ------------------ | --------------------------------------------------------------------------- | --------------------------- |
+| `main_branch`      | Branch to merge into                                                        | Auto-detected               |
+| `base_branch`      | Default base branch for new worktrees (overridden by `--base`)              | Current branch              |
+| `worktree_dir`     | Directory for worktrees (absolute or relative)                              | `<project>__worktrees/`     |
+| `nerdfont`         | Enable nerdfont icons (prompted on first run)                               | Prompted                    |
+| `window_prefix`    | Override tmux window/session prefix                                         | Icon or `wm-`               |
+| `agent`            | Default agent for `<agent>` placeholder                                     | `claude`                    |
+| `prompt_file_only` | Write prompt files without injecting into agent commands                    | `false`                     |
+| `layouts`          | Named pane layouts, selectable with `-l/--layout`                           | --                          |
+| `merge_strategy`   | Default merge strategy (`merge`, `rebase`, `squash`)                        | `merge`                     |
+| `theme`            | Dashboard color scheme (see [themes](#themes))                              | `default` (auto dark/light) |
+| `mode`             | Tmux mode (`window` or `session`). See [session mode](/guide/session-mode). | `window`                    |
+
+### Themes
+
+The dashboard supports 11 color schemes, each with dark and light variants. Dark/light mode is auto-detected from your terminal background.
+
+Press `T` (shift+t) in the dashboard to cycle through schemes. The selection persists to your global config (`~/.config/workmux/config.yaml`).
+
+Available schemes: `default`, `emberforge`, `glacier-signal`, `obsidian-pop`, `slate-garden`, `phosphor-arcade`, `lasergrid`, `mossfire`, `night-sorbet`, `graphite-code`, `festival-circuit`, `teal-drift`.
+
+```yaml
+# Just a scheme name (auto-detect dark/light)
+theme: emberforge
+
+# Force a specific mode
+theme:
+  scheme: emberforge
+  mode: light
+```
 
 ### Naming options
 
@@ -109,7 +128,7 @@ Each pane supports:
 
 - `<agent>`: resolves to the configured agent (from `agent` config or `--agent` flag)
 
-Built-in agents (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`) are auto-detected when used as literal commands and receive prompt injection automatically, without needing the `<agent>` placeholder or a matching `agent` config:
+Built-in agents (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`, `pi`) are auto-detected when used as literal commands and receive prompt injection automatically, without needing the `<agent>` placeholder or a matching `agent` config:
 
 ```yaml
 panes:
@@ -152,6 +171,8 @@ files:
 ```
 
 Both `copy` and `symlink` accept glob patterns.
+
+To re-apply file operations to existing worktrees (e.g., after updating the config), use [`workmux sync-files`](/reference/commands/sync-files).
 
 ### Lifecycle hooks
 
@@ -212,7 +233,7 @@ auto_name:
 The command used for branch name generation is resolved in this order:
 
 1. `auto_name.command` is set: uses that command as-is
-2. `agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`): uses the agent's CLI with a fast/cheap model automatically
+2. `agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`, `pi`): uses the agent's CLI with a fast/cheap model automatically
 3. Neither: falls back to the `llm` CLI (requires installation)
 
 To override back to `llm` when an agent is configured, set `auto_name.command: "llm"`.

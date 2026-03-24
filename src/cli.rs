@@ -300,9 +300,9 @@ enum Commands {
 
     /// Open a tmux window for an existing worktree
     Open {
-        /// Worktree name (directory name, visible in tmux window). Optional with --new.
+        /// Worktree name(s) (directory name, visible in tmux window). Optional with --new.
         #[arg(value_parser = WorktreeHandleParser::new(), required_unless_present = "new")]
-        name: Option<String>,
+        names: Vec<String>,
 
         /// Re-run post-create hooks (e.g., pnpm install)
         #[arg(long)]
@@ -405,6 +405,10 @@ enum Commands {
         #[arg(long)]
         pr: bool,
 
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
         /// Filter by worktree name or branch (supports multiple)
         #[arg(value_parser = WorktreeBranchParser::new())]
         filter: Vec<String>,
@@ -498,6 +502,14 @@ enum Commands {
         /// Maximum wait time in seconds
         #[arg(long)]
         timeout: Option<u64>,
+    },
+
+    /// Re-apply file operations (copy/symlink) to worktrees
+    #[command(name = "sync-files")]
+    SyncFiles {
+        /// Sync all worktrees instead of just the current one
+        #[arg(long)]
+        all: bool,
     },
 
     /// Generate example .workmux.yaml configuration file
@@ -758,20 +770,13 @@ pub fn run() -> Result<()> {
             session,
         ),
         Commands::Open {
-            name,
+            names,
             run_hooks,
             force_files,
             new,
             session,
             prompt,
-        } => command::open::run(
-            name.as_deref(),
-            run_hooks,
-            force_files,
-            new,
-            session,
-            prompt,
-        ),
+        } => command::open::run(&names, run_hooks, force_files, new, session, prompt),
         Commands::Close { name } => command::close::run(name.as_deref()),
         Commands::Merge {
             name,
@@ -803,7 +808,7 @@ pub fn run() -> Result<()> {
             force,
             keep_branch,
         } => command::remove::run(names, gone, all, force, keep_branch),
-        Commands::List { pr, filter } => command::list::run(pr, &filter),
+        Commands::List { pr, json, filter } => command::list::run(pr, json, &filter),
         Commands::Path { name } => command::path::run(&name),
         Commands::Send { name, text, file } => {
             command::send::run(&name, text.as_deref(), file.as_deref())
@@ -828,6 +833,7 @@ pub fn run() -> Result<()> {
             timeout,
         } => command::run::run(&name, command, background, keep, timeout),
         Commands::Exec { run_dir } => command::exec::run(&run_dir),
+        Commands::SyncFiles { all } => command::sync_files::run(all),
         Commands::Init => crate::config::Config::init(),
         Commands::Setup { hooks, skills } => command::setup::run(hooks, skills),
         Commands::Docs => command::docs::run(),

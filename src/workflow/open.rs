@@ -4,6 +4,7 @@ use regex::Regex;
 use crate::git;
 use crate::multiplexer::MuxHandle;
 use crate::multiplexer::util::prefixed;
+use crate::prompt::Prompt;
 use tracing::info;
 
 use super::context::WorkflowContext;
@@ -19,6 +20,7 @@ pub fn open(
     new_window: bool,
     session_override: bool,
     target_session: Option<&str>,
+    prompt_file_only: Option<&Prompt>,
 ) -> Result<CreateResult> {
     info!(
         name = name,
@@ -201,6 +203,12 @@ pub fn open(
     } else {
         None
     };
+
+    // In file-only mode, write prompt file to the worktree before pane setup
+    // so editors/plugins can detect it on startup.
+    if let Some(prompt) = prompt_file_only {
+        setup::write_prompt_file(Some(&worktree_path), &branch_name, prompt)?;
+    }
 
     let options_with_workdir = SetupOptions {
         working_dir,

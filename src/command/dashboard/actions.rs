@@ -1,6 +1,6 @@
 //! Action enum and dispatcher for dashboard key handling.
 
-use super::app::{App, ViewMode};
+use super::app::{App, DashboardTab, ViewMode};
 use super::diff_ops::DiffOps;
 
 /// All possible actions in the dashboard.
@@ -18,7 +18,11 @@ pub enum Action {
     JumpToLast,
     PeekSelected,
 
+    // Tab switching
+    SwitchTab,
+
     // Dashboard commands
+    CycleColorScheme,
     CycleSortMode,
     ToggleScopeFilter,
     ToggleStaleFilter,
@@ -31,6 +35,7 @@ pub enum Action {
     LoadWipDiff,
     SendCommitDashboard,
     TriggerMergeDashboard,
+    KillSelected,
 
     // Input mode
     SendKey(String),
@@ -56,6 +61,27 @@ pub enum Action {
     NextHunk,
     ExitPatchMode,
 
+    // Shared (both tabs)
+    OpenPr,
+
+    // Worktree view
+    WorktreeNext,
+    WorktreePrevious,
+    WorktreeJumpToIndex(usize),
+    RemoveSelectedWorktree,
+    CloseSelectedWorktreeWindow,
+    StartSweep,
+    CycleWorktreeSortMode,
+    JumpToSelectedWorktree,
+    ShowProjectPicker,
+
+    // Filter mode
+    EnterFilterMode,
+    AcceptFilter,
+    ClearFilter,
+    FilterAppendChar(char),
+    FilterDeleteChar,
+
     // Comment input
     CancelComment,
     SendComment,
@@ -73,7 +99,24 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
             false
         }
         Action::Quit => {
-            app.should_quit = true;
+            match app.active_tab {
+                DashboardTab::Agents => {
+                    if !app.filter_text.is_empty() {
+                        app.filter_text.clear();
+                        app.apply_filters();
+                    } else {
+                        app.should_quit = true;
+                    }
+                }
+                DashboardTab::Worktrees => {
+                    if !app.worktree_filter_text.is_empty() {
+                        app.worktree_filter_text.clear();
+                        app.trigger_worktree_refetch();
+                    } else {
+                        app.should_quit = true;
+                    }
+                }
+            }
             false
         }
 
@@ -104,6 +147,10 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
         }
 
         // Dashboard commands
+        Action::CycleColorScheme => {
+            app.cycle_color_scheme();
+            false
+        }
         Action::CycleSortMode => {
             app.cycle_sort_mode();
             false
@@ -152,6 +199,120 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
         }
         Action::TriggerMergeDashboard => {
             app.trigger_merge_for_selected();
+            false
+        }
+        Action::KillSelected => {
+            app.kill_selected();
+            false
+        }
+
+        // Shared (both tabs)
+        Action::OpenPr => {
+            app.open_pr_for_selected();
+            false
+        }
+
+        // Tab switching
+        Action::SwitchTab => {
+            app.switch_tab();
+            false
+        }
+
+        // Worktree view
+        Action::WorktreeNext => {
+            app.worktree_next();
+            false
+        }
+        Action::WorktreePrevious => {
+            app.worktree_previous();
+            false
+        }
+        Action::WorktreeJumpToIndex(idx) => {
+            app.worktree_jump_to_index(idx);
+            false
+        }
+        Action::RemoveSelectedWorktree => {
+            app.remove_selected_worktree();
+            false
+        }
+        Action::CloseSelectedWorktreeWindow => {
+            app.close_selected_worktree_window();
+            false
+        }
+        Action::StartSweep => {
+            app.start_sweep();
+            false
+        }
+        Action::CycleWorktreeSortMode => {
+            app.cycle_worktree_sort_mode();
+            false
+        }
+        Action::JumpToSelectedWorktree => {
+            app.jump_to_selected_worktree();
+            false
+        }
+        Action::ShowProjectPicker => {
+            app.show_project_picker();
+            false
+        }
+
+        // Filter mode (tab-aware)
+        Action::EnterFilterMode => {
+            match app.active_tab {
+                DashboardTab::Agents => app.filter_active = true,
+                DashboardTab::Worktrees => app.worktree_filter_active = true,
+            }
+            false
+        }
+        Action::AcceptFilter => {
+            match app.active_tab {
+                DashboardTab::Agents => app.filter_active = false,
+                DashboardTab::Worktrees => app.worktree_filter_active = false,
+            }
+            false
+        }
+        Action::ClearFilter => {
+            match app.active_tab {
+                DashboardTab::Agents => {
+                    app.filter_active = false;
+                    app.filter_text.clear();
+                    app.apply_filters();
+                }
+                DashboardTab::Worktrees => {
+                    app.worktree_filter_active = false;
+                    app.worktree_filter_text.clear();
+                    // Trigger re-fetch to restore full list
+                    app.trigger_worktree_refetch();
+                }
+            }
+            false
+        }
+        Action::FilterAppendChar(c) => {
+            match app.active_tab {
+                DashboardTab::Agents => {
+                    app.filter_text.push(c);
+                    app.apply_filters();
+                }
+                DashboardTab::Worktrees => {
+                    app.worktree_filter_text.push(c);
+                    // Trigger re-fetch to apply filter
+                    app.trigger_worktree_refetch();
+                }
+            }
+            false
+        }
+        Action::FilterDeleteChar => {
+            match app.active_tab {
+                DashboardTab::Agents => {
+                    app.filter_text.pop();
+                    app.apply_filters();
+                }
+                DashboardTab::Worktrees => {
+                    app.worktree_filter_text.pop();
+                    // Trigger re-fetch to apply filter
+                    app.trigger_worktree_refetch();
+                }
+            }
             false
         }
 
