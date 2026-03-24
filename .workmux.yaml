@@ -6,6 +6,7 @@ panes:
 
 # Commands run after worktree creation (blocks window creation, keep fast)
 post_create:
+  - mise trust
   - direnv allow # Allow direnv to activate mise for this worktree
 
 files:
